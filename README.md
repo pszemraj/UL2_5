@@ -1,6 +1,6 @@
 # UL2.5 Data Collator
 
-GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementing the UL2 mixture-of-denoisers training paradigm.
+GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementing and improving the UL2 mixture-of-denoisers training paradigm.
 
 ## Features
 
@@ -9,6 +9,26 @@ GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementin
 - **HuggingFace compatible**: Works with `Trainer` and `DataLoader`
 - **Curriculum learning**: Gradually shift denoiser mixture during training
 - **Two implementations**: HF-integrated (`ul2_5_hf.py`) or pure PyTorch (`ul2_5_torch.py`)
+
+---
+
+- [UL2.5 Data Collator](#ul25-data-collator)
+  - [Features](#features)
+  - [Installation](#installation)
+  - [Quick Start](#quick-start)
+  - [Configuration Presets](#configuration-presets)
+  - [Usage with HuggingFace Trainer](#usage-with-huggingface-trainer)
+  - [Usage with DataLoader](#usage-with-dataloader)
+  - [Curriculum Learning](#curriculum-learning)
+  - [Custom Configuration](#custom-configuration)
+  - [Denoising Tasks](#denoising-tasks)
+  - [API Reference](#api-reference)
+  - [Performance Tips](#performance-tips)
+  - [Benchmarks](#benchmarks)
+  - [Visualizations](#visualizations)
+  - [References](#references)
+
+---
 
 ## Installation
 
@@ -61,12 +81,12 @@ print(batch["labels"].shape)         # [batch_size, max_dec_len]
 
 ## Configuration Presets
 
-| Preset | Description | Use Case |
-|--------|-------------|----------|
-| `UL25Config.recommended()` | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training |
-| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy | Long pre-training runs |
-| `UL25Config.ul2_original()` | Original UL2 paper 7-denoiser mixture | Reproducing UL2 |
-| `UL25Config.t5_standard()` | Standard T5 span corruption only | T5-style training |
+| Preset                                     | Description                                         | Use Case               |
+| ------------------------------------------ | --------------------------------------------------- | ---------------------- |
+| `UL25Config.recommended()`                 | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training   |
+| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy           | Long pre-training runs |
+| `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2        |
+| `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training      |
 
 ## Usage with HuggingFace Trainer
 
@@ -168,6 +188,7 @@ collator = UL25DataCollator(tokenizer, config)
 ## Denoising Tasks
 
 ### Span Corruption (`Task.SPAN`)
+
 Standard T5-style: randomly mask contiguous spans, replace with sentinel tokens.
 
 ```
@@ -177,9 +198,11 @@ Target: <extra_id_0> brown fox <extra_id_1> over the lazy
 ```
 
 ### Middle-Heavy Span (`Task.SPAN_MIDDLE`)
+
 Position-biased masking preferring middle tokens (Gaussian weighting).
 
 ### Prefix LM (`Task.PREFIX_RANDOM/SHORT/LONG`)
+
 Split sequence into prefix (encoder) and suffix (decoder target).
 
 - `PREFIX_RANDOM`: Random split point (20-80%)
@@ -187,6 +210,7 @@ Split sequence into prefix (encoder) and suffix (decoder target).
 - `PREFIX_LONG`: Long prefix, short target (QA-focused)
 
 ### Infilling (`Task.INFILLING`)
+
 Mask a contiguous middle chunk, provide bidirectional context.
 
 ## API Reference
@@ -205,6 +229,7 @@ UL25DataCollator(
 ```
 
 **Properties:**
+
 - `progress`: Float 0.0-1.0 for curriculum learning
 
 **Returns:** `{"input_ids", "attention_mask", "labels"}`
@@ -251,23 +276,23 @@ python benchmark_ul2_5.py
 
 Sample output (RTX 4070 Laptop):
 
-| Config | Batch | SeqLen | Tokens/s |
-|--------|-------|--------|----------|
-| recommended | 32 | 512 | ~380k |
-| ul2_original | 32 | 512 | ~230k |
-| t5_standard | 32 | 512 | ~240k |
+| Config       | Batch | SeqLen | Tokens/s |
+| ------------ | ----- | ------ | -------- |
+| recommended  | 32    | 512    | ~380k    |
+| ul2_original | 32    | 512    | ~230k    |
+| t5_standard  | 32    | 512    | ~240k    |
 
 ## Visualizations
 
 ### Mask Distributions
+
 ![Mask Distributions](assets/mask_distributions_torch.png)
 
 ### Mask Examples
+
 ![Mask Examples](assets/mask_examples_torch.png)
 
-## License
-
-MIT
+---
 
 ## References
 
