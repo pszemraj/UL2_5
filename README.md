@@ -33,7 +33,7 @@ GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementin
 ## Installation
 
 ```bash
-pip install torch>=2.0.0 transformers>=4.30.0 sentencepiece
+pip install torch>=2.0.0 transformers>=4.30.0 sentencepiece pydantic>=2.0.0
 ```
 
 Or clone and install dependencies:

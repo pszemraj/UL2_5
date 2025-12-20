@@ -12,13 +12,13 @@ import torch
 from transformers import AutoTokenizer
 
 from ul2_5_hf import (
-    UL25DataCollator,
     UL25Config,
-    span_corruption_mask,
+    UL25DataCollator,
+    create_sentinel_ids,
+    infilling_mask,
     middle_heavy_mask,
     prefix_lm_mask,
-    infilling_mask,
-    create_sentinel_ids,
+    span_corruption_mask,
 )
 
 FIGURES_DIR = Path(__file__).parent / "figures"

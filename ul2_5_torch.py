@@ -36,18 +36,11 @@ from __future__ import annotations
 
 import warnings
 from enum import IntEnum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+from pydantic import BaseModel, Field, field_validator, model_validator
 from torch import Tensor
-
-try:
-    from pydantic import BaseModel, Field, field_validator, model_validator
-    PYDANTIC_AVAILABLE = True
-except ImportError:
-    PYDANTIC_AVAILABLE = False
-    BaseModel = object
-
 
 # =============================================================================
 # CONFIGURATION (Pydantic-based)
@@ -65,268 +58,157 @@ class Task(IntEnum):
     INFILLING = 5  # Middle-out masking
 
 
-if PYDANTIC_AVAILABLE:
+class DenoiserSpec(BaseModel):
+    """Single denoiser specification with validation."""
 
-    class DenoiserSpec(BaseModel):
-        """Single denoiser specification with validation."""
+    task: Task
+    mu: float = Field(default=3.0, gt=0, description="Mean span length")
+    r: float = Field(default=0.15, ge=0.01, le=0.99, description="Noise density")
+    max_spans: int = Field(default=512, gt=0, description="Maximum number of spans")
+    prefix: str = Field(default="", description="Task prefix token")
+    variable_r: bool = Field(default=False, description="Sample r from bounds")
+    r_bounds: Tuple[float, float] = Field(
+        default=(0.05, 0.50), description="Bounds for variable r"
+    )
 
-        task: Task
-        mu: float = Field(default=3.0, gt=0, description="Mean span length")
-        r: float = Field(default=0.15, ge=0.01, le=0.99, description="Noise density")
-        max_spans: int = Field(default=512, gt=0, description="Maximum number of spans")
-        prefix: str = Field(default="", description="Task prefix token")
-        variable_r: bool = Field(default=False, description="Sample r from bounds")
-        r_bounds: Tuple[float, float] = Field(
-            default=(0.05, 0.50), description="Bounds for variable r"
-        )
+    model_config = {"frozen": False, "extra": "forbid"}
 
-        model_config = {"frozen": False, "extra": "forbid"}
+    @field_validator("r_bounds")
+    @classmethod
+    def validate_r_bounds(cls, v: Tuple[float, float]) -> Tuple[float, float]:
+        if v[0] >= v[1]:
+            raise ValueError("r_bounds[0] must be less than r_bounds[1]")
+        if v[0] < 0.01 or v[1] > 0.99:
+            raise ValueError("r_bounds must be within [0.01, 0.99]")
+        return v
 
-        @field_validator("r_bounds")
-        @classmethod
-        def validate_r_bounds(cls, v: Tuple[float, float]) -> Tuple[float, float]:
-            if v[0] >= v[1]:
-                raise ValueError("r_bounds[0] must be less than r_bounds[1]")
-            if v[0] < 0.01 or v[1] > 0.99:
-                raise ValueError("r_bounds must be within [0.01, 0.99]")
-            return v
+    def __repr__(self):
+        return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
 
-        def __repr__(self):
-            return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
 
-    class UL25Config(BaseModel):
-        """UL2.5 mixture configuration with validation."""
+class UL25Config(BaseModel):
+    """UL2.5 mixture configuration with validation."""
 
-        denoisers: List[DenoiserSpec] = Field(default_factory=list)
-        weights: List[float] = Field(default_factory=list)
-        curriculum_start: Optional[List[float]] = Field(
-            default=None, description="Starting weights for curriculum"
-        )
-        curriculum_end: Optional[List[float]] = Field(
-            default=None, description="Ending weights for curriculum"
-        )
-        enable_length_adaptive: bool = Field(
-            default=True, description="Enable length-adaptive task selection"
-        )
-        enable_boundary_snapping: bool = Field(
-            default=True, description="Enable span boundary snapping"
-        )
+    denoisers: List[DenoiserSpec] = Field(default_factory=list)
+    weights: List[float] = Field(default_factory=list)
+    curriculum_start: Optional[List[float]] = Field(
+        default=None, description="Starting weights for curriculum"
+    )
+    curriculum_end: Optional[List[float]] = Field(
+        default=None, description="Ending weights for curriculum"
+    )
+    enable_length_adaptive: bool = Field(
+        default=True, description="Enable length-adaptive task selection"
+    )
+    enable_boundary_snapping: bool = Field(
+        default=True, description="Enable span boundary snapping"
+    )
 
-        model_config = {"frozen": False, "extra": "forbid"}
+    model_config = {"frozen": False, "extra": "forbid"}
 
-        @model_validator(mode="after")
-        def validate_config(self) -> "UL25Config":
-            # Normalize weights
-            if self.weights:
-                total = sum(self.weights)
-                if total > 0:
-                    self.weights = [w / total for w in self.weights]
-            if self.curriculum_start:
-                total = sum(self.curriculum_start)
-                if total > 0:
-                    self.curriculum_start = [w / total for w in self.curriculum_start]
-            if self.curriculum_end:
-                total = sum(self.curriculum_end)
-                if total > 0:
-                    self.curriculum_end = [w / total for w in self.curriculum_end]
-
-            # Validate lengths match
-            n = len(self.denoisers)
-            if self.weights and len(self.weights) != n:
-                raise ValueError(
-                    f"weights length ({len(self.weights)}) must match denoisers ({n})"
-                )
-            if self.curriculum_start and len(self.curriculum_start) != n:
-                raise ValueError(
-                    f"curriculum_start length must match denoisers ({n})"
-                )
-            if self.curriculum_end and len(self.curriculum_end) != n:
-                raise ValueError(
-                    f"curriculum_end length must match denoisers ({n})"
-                )
-
-            return self
-
-        def get_weights(self, progress: float = 0.0) -> List[float]:
-            """Get interpolated weights based on training progress."""
-            if self.curriculum_start is None or self.curriculum_end is None:
-                return self.weights
-
-            progress = max(0.0, min(1.0, progress))
-            return [
-                (1 - progress) * s + progress * e
-                for s, e in zip(self.curriculum_start, self.curriculum_end)
-            ]
-
-        @classmethod
-        def recommended(cls) -> "UL25Config":
-            """Recommended mixture based on feasibility analysis."""
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
-            )
-
-        @classmethod
-        def recommended_with_curriculum(cls) -> "UL25Config":
-            """
-            Recommended config with curriculum learning.
-
-            Early: More span denoising (easier)
-            Late: More prefix LM (matches inference)
-            """
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
-                curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
-                curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
-            )
-
-        @classmethod
-        def span_heavy(cls) -> "UL25Config":
-            """Original UL2-style with more span denoising."""
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
-                    DenoiserSpec(task=Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
-                ],
-                weights=[0.20, 0.20, 0.15, 0.15, 0.30],
-            )
-
-        @classmethod
-        def minimal(cls) -> "UL25Config":
-            """Minimal config for testing."""
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM),
-                ],
-                weights=[0.5, 0.5],
-            )
-
-else:
-    # Fallback dataclass-based config when pydantic is not available
-    from dataclasses import dataclass, field
-
-    @dataclass
-    class DenoiserSpec:
-        """Single denoiser specification."""
-
-        task: Task
-        mu: float = 3.0
-        r: float = 0.15
-        max_spans: int = 512
-        prefix: str = ""
-        variable_r: bool = False
-        r_bounds: Tuple[float, float] = (0.05, 0.50)
-
-        def __repr__(self):
-            return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
-
-    @dataclass
-    class UL25Config:
-        """UL2.5 mixture configuration."""
-
-        denoisers: List[DenoiserSpec] = field(default_factory=list)
-        weights: List[float] = field(default_factory=list)
-        curriculum_start: Optional[List[float]] = None
-        curriculum_end: Optional[List[float]] = None
-        enable_length_adaptive: bool = True
-        enable_boundary_snapping: bool = True
-
-        def __post_init__(self):
-            if self.weights:
-                total = sum(self.weights)
+    @model_validator(mode="after")
+    def validate_config(self) -> "UL25Config":
+        # Normalize weights
+        if self.weights:
+            total = sum(self.weights)
+            if total > 0:
                 self.weights = [w / total for w in self.weights]
-            if self.curriculum_start:
-                total = sum(self.curriculum_start)
+        if self.curriculum_start:
+            total = sum(self.curriculum_start)
+            if total > 0:
                 self.curriculum_start = [w / total for w in self.curriculum_start]
-            if self.curriculum_end:
-                total = sum(self.curriculum_end)
+        if self.curriculum_end:
+            total = sum(self.curriculum_end)
+            if total > 0:
                 self.curriculum_end = [w / total for w in self.curriculum_end]
 
-        def get_weights(self, progress: float = 0.0) -> List[float]:
-            """Get interpolated weights based on training progress."""
-            if self.curriculum_start is None or self.curriculum_end is None:
-                return self.weights
-            progress = max(0.0, min(1.0, progress))
-            return [
-                (1 - progress) * s + progress * e
-                for s, e in zip(self.curriculum_start, self.curriculum_end)
-            ]
-
-        @classmethod
-        def recommended(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+        # Validate lengths match
+        n = len(self.denoisers)
+        if self.weights and len(self.weights) != n:
+            raise ValueError(
+                f"weights length ({len(self.weights)}) must match denoisers ({n})"
             )
+        if self.curriculum_start and len(self.curriculum_start) != n:
+            raise ValueError(f"curriculum_start length must match denoisers ({n})")
+        if self.curriculum_end and len(self.curriculum_end) != n:
+            raise ValueError(f"curriculum_end length must match denoisers ({n})")
 
-        @classmethod
-        def recommended_with_curriculum(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
-                curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
-                curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
-            )
+        return self
 
-        @classmethod
-        def span_heavy(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
-                    DenoiserSpec(Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
-                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-                ],
-                weights=[0.20, 0.20, 0.15, 0.15, 0.30],
-            )
+    def get_weights(self, progress: float = 0.0) -> List[float]:
+        """Get interpolated weights based on training progress."""
+        if self.curriculum_start is None or self.curriculum_end is None:
+            return self.weights
 
-        @classmethod
-        def minimal(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15),
-                    DenoiserSpec(Task.PREFIX_RANDOM),
-                ],
-                weights=[0.5, 0.5],
-            )
+        progress = max(0.0, min(1.0, progress))
+        return [
+            (1 - progress) * s + progress * e
+            for s, e in zip(self.curriculum_start, self.curriculum_end)
+        ]
+
+    @classmethod
+    def recommended(cls) -> "UL25Config":
+        """Recommended mixture based on feasibility analysis."""
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+            ],
+            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+        )
+
+    @classmethod
+    def recommended_with_curriculum(cls) -> "UL25Config":
+        """
+        Recommended config with curriculum learning.
+
+        Early: More span denoising (easier)
+        Late: More prefix LM (matches inference)
+        """
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+            ],
+            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+            curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
+            curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
+        )
+
+    @classmethod
+    def span_heavy(cls) -> "UL25Config":
+        """Original UL2-style with more span denoising."""
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
+                DenoiserSpec(task=Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+            ],
+            weights=[0.20, 0.20, 0.15, 0.15, 0.30],
+        )
+
+    @classmethod
+    def minimal(cls) -> "UL25Config":
+        """Minimal config for testing."""
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15),
+                DenoiserSpec(task=Task.PREFIX_RANDOM),
+            ],
+            weights=[0.5, 0.5],
+        )
 
 
 # =============================================================================
@@ -1119,7 +1001,6 @@ def _run_tests():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    print(f"Pydantic available: {PYDANTIC_AVAILABLE}")
 
     # Test masking functions
     print("\n[TEST] Masking functions")
@@ -1237,11 +1118,11 @@ def _run_tests():
     # Test curriculum
     print("\n[TEST] Curriculum learning")
     collator.progress = 0.0
-    print(f"  progress=0.0: set successfully")
+    print("  progress=0.0: set successfully")
     collator.progress = 0.5
-    print(f"  progress=0.5: set successfully")
+    print("  progress=0.5: set successfully")
     collator.progress = 1.0
-    print(f"  progress=1.0: set successfully")
+    print("  progress=1.0: set successfully")
 
     # Test length-adaptive weights
     print("\n[TEST] Length-adaptive weights")
@@ -1258,9 +1139,7 @@ def _run_tests():
         batch_weights = batch_collator._get_length_adaptive_weights_batch(
             mixed_seq_lens
         )
-        short_expected = batch_collator._get_length_adaptive_weights(
-            mixed_seq_lens[0]
-        )
+        short_expected = batch_collator._get_length_adaptive_weights(mixed_seq_lens[0])
         long_expected = batch_collator._get_length_adaptive_weights(mixed_seq_lens[1])
         assert torch.allclose(batch_weights[0], short_expected)
         assert torch.allclose(batch_weights[1], long_expected)

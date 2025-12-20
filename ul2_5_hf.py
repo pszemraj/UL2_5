@@ -58,33 +58,11 @@ import warnings
 from enum import IntEnum
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    import torch
-    from torch import Tensor
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    Tensor = Any
-
-try:
-    from transformers import PreTrainedTokenizerBase
-    from transformers.data.data_collator import DataCollatorMixin
-
-    HF_AVAILABLE = True
-except ImportError:
-    HF_AVAILABLE = False
-    PreTrainedTokenizerBase = Any
-    DataCollatorMixin = object
-
-try:
-    from pydantic import BaseModel, Field, field_validator, model_validator
-
-    PYDANTIC_AVAILABLE = True
-except ImportError:
-    PYDANTIC_AVAILABLE = False
-    BaseModel = object
-
+import torch
+from pydantic import BaseModel, Field, field_validator, model_validator
+from torch import Tensor
+from transformers import PreTrainedTokenizerBase
+from transformers.data.data_collator import DataCollatorMixin
 
 # =============================================================================
 # CONFIGURATION
@@ -102,657 +80,531 @@ class Task(IntEnum):
     INFILLING = 5  # Middle-out (bidirectional context)
 
 
-if PYDANTIC_AVAILABLE:
+class DenoiserSpec(BaseModel):
+    """Single denoiser configuration with validation."""
 
-    class DenoiserSpec(BaseModel):
-        """Single denoiser configuration with validation."""
+    task: Task
+    mu: float = Field(default=3.0, gt=0, description="Mean span length")
+    r: float = Field(default=0.15, ge=0.01, le=0.99, description="Noise density")
+    max_spans: int = Field(default=512, gt=0, description="Max corruption spans")
+    prefix: str = Field(default="", description="Task prefix token")
+    variable_r: bool = Field(default=False, description="Sample r from bounds")
+    r_bounds: Tuple[float, float] = Field(
+        default=(0.05, 0.50), description="Bounds for variable r"
+    )
 
-        task: Task
-        mu: float = Field(default=3.0, gt=0, description="Mean span length")
-        r: float = Field(default=0.15, ge=0.01, le=0.99, description="Noise density")
-        max_spans: int = Field(default=512, gt=0, description="Max corruption spans")
-        prefix: str = Field(default="", description="Task prefix token")
-        variable_r: bool = Field(default=False, description="Sample r from bounds")
-        r_bounds: Tuple[float, float] = Field(
-            default=(0.05, 0.50), description="Bounds for variable r"
-        )
+    model_config = {"frozen": False, "extra": "forbid"}
 
-        model_config = {"frozen": False, "extra": "forbid"}
+    @field_validator("r_bounds")
+    @classmethod
+    def validate_r_bounds(cls, v: Tuple[float, float]) -> Tuple[float, float]:
+        if v[0] >= v[1]:
+            raise ValueError("r_bounds[0] must be less than r_bounds[1]")
+        if v[0] < 0.01 or v[1] > 0.99:
+            raise ValueError("r_bounds must be within [0.01, 0.99]")
+        return v
 
-        @field_validator("r_bounds")
-        @classmethod
-        def validate_r_bounds(cls, v: Tuple[float, float]) -> Tuple[float, float]:
-            if v[0] >= v[1]:
-                raise ValueError("r_bounds[0] must be less than r_bounds[1]")
-            if v[0] < 0.01 or v[1] > 0.99:
-                raise ValueError("r_bounds must be within [0.01, 0.99]")
-            return v
+    def __repr__(self):
+        return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
 
-        def __repr__(self):
-            return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
 
-    class UL25Config(BaseModel):
-        """
-        UL2.5 mixture configuration with validation.
+class UL25Config(BaseModel):
+    """
+    UL2.5 mixture configuration with validation.
 
-        Attributes:
-            denoisers: List of DenoiserSpec defining the task mixture
-            weights: Sampling weights (normalized automatically)
-            curriculum_start: Optional starting weights for curriculum
-            curriculum_end: Optional ending weights for curriculum
-            enable_length_adaptive: Enable length-adaptive task selection
-            enable_boundary_snapping: Enable span boundary snapping
-        """
+    Attributes:
+        denoisers: List of DenoiserSpec defining the task mixture
+        weights: Sampling weights (normalized automatically)
+        curriculum_start: Optional starting weights for curriculum
+        curriculum_end: Optional ending weights for curriculum
+        enable_length_adaptive: Enable length-adaptive task selection
+        enable_boundary_snapping: Enable span boundary snapping
+    """
 
-        denoisers: List[DenoiserSpec] = Field(default_factory=list)
-        weights: List[float] = Field(default_factory=list)
-        curriculum_start: Optional[List[float]] = Field(
-            default=None, description="Starting weights for curriculum"
-        )
-        curriculum_end: Optional[List[float]] = Field(
-            default=None, description="Ending weights for curriculum"
-        )
-        enable_length_adaptive: bool = Field(
-            default=True, description="Enable length-adaptive task selection"
-        )
-        enable_boundary_snapping: bool = Field(
-            default=True, description="Enable span boundary snapping"
-        )
+    denoisers: List[DenoiserSpec] = Field(default_factory=list)
+    weights: List[float] = Field(default_factory=list)
+    curriculum_start: Optional[List[float]] = Field(
+        default=None, description="Starting weights for curriculum"
+    )
+    curriculum_end: Optional[List[float]] = Field(
+        default=None, description="Ending weights for curriculum"
+    )
+    enable_length_adaptive: bool = Field(
+        default=True, description="Enable length-adaptive task selection"
+    )
+    enable_boundary_snapping: bool = Field(
+        default=True, description="Enable span boundary snapping"
+    )
 
-        model_config = {"frozen": False, "extra": "forbid"}
+    model_config = {"frozen": False, "extra": "forbid"}
 
-        @model_validator(mode="after")
-        def validate_config(self) -> "UL25Config":
-            # Normalize weights
-            if self.weights:
-                total = sum(self.weights)
-                if total > 0:
-                    self.weights = [w / total for w in self.weights]
-            if self.curriculum_start:
-                total = sum(self.curriculum_start)
-                if total > 0:
-                    self.curriculum_start = [w / total for w in self.curriculum_start]
-            if self.curriculum_end:
-                total = sum(self.curriculum_end)
-                if total > 0:
-                    self.curriculum_end = [w / total for w in self.curriculum_end]
-
-            # Validate lengths match
-            n = len(self.denoisers)
-            if self.weights and len(self.weights) != n:
-                raise ValueError(
-                    f"weights length ({len(self.weights)}) must match denoisers ({n})"
-                )
-            if self.curriculum_start and len(self.curriculum_start) != n:
-                raise ValueError(
-                    f"curriculum_start length must match denoisers ({n})"
-                )
-            if self.curriculum_end and len(self.curriculum_end) != n:
-                raise ValueError(f"curriculum_end length must match denoisers ({n})")
-
-            return self
-
-        def get_weights(self, progress: float = 0.0) -> List[float]:
-            """Get interpolated weights based on training progress."""
-            if self.curriculum_start is None or self.curriculum_end is None:
-                return self.weights
-
-            progress = max(0.0, min(1.0, progress))
-            return [
-                (1 - progress) * s + progress * e
-                for s, e in zip(self.curriculum_start, self.curriculum_end)
-            ]
-
-        @classmethod
-        def recommended(cls) -> "UL25Config":
-            """
-            Recommended configuration based on feasibility analysis.
-
-            Mixture:
-            - 30% span denoising (standard + middle-heavy)
-            - 50% prefix LM variants
-            - 20% infilling
-            """
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
-            )
-
-        @classmethod
-        def recommended_with_curriculum(cls) -> "UL25Config":
-            """
-            Recommended config with curriculum learning.
-
-            Early: More span denoising (easier)
-            Late: More prefix LM (matches inference)
-            """
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
-                curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
-                curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
-            )
-
-        @classmethod
-        def ul2_original(cls) -> "UL25Config":
-            """Original UL2 7-denoiser mixture."""
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
-                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.15, prefix="[X]"),
-                    DenoiserSpec(task=Task.SPAN, mu=64.0, r=0.15, prefix="[X]"),
-                    DenoiserSpec(task=Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
-                ],
-                weights=[0.165, 0.165, 0.34, 0.0825, 0.0825, 0.0825, 0.0825],
-            )
-
-        @classmethod
-        def t5_standard(cls) -> "UL25Config":
-            """Standard T5 span corruption."""
-            return cls(
-                denoisers=[DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15)],
-                weights=[1.0],
-            )
-
-        @classmethod
-        def minimal(cls) -> "UL25Config":
-            """Minimal config for testing."""
-            return cls(
-                denoisers=[
-                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15),
-                    DenoiserSpec(task=Task.PREFIX_RANDOM),
-                ],
-                weights=[0.5, 0.5],
-            )
-
-else:
-    # Fallback dataclass-based config when pydantic is not available
-    from dataclasses import dataclass, field
-
-    @dataclass
-    class DenoiserSpec:
-        """Single denoiser configuration."""
-
-        task: Task
-        mu: float = 3.0
-        r: float = 0.15
-        max_spans: int = 512
-        prefix: str = ""
-        variable_r: bool = False
-        r_bounds: Tuple[float, float] = (0.05, 0.50)
-
-        def __repr__(self):
-            return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
-
-    @dataclass
-    class UL25Config:
-        """UL2.5 mixture configuration."""
-
-        denoisers: List[DenoiserSpec] = field(default_factory=list)
-        weights: List[float] = field(default_factory=list)
-        curriculum_start: Optional[List[float]] = None
-        curriculum_end: Optional[List[float]] = None
-        enable_length_adaptive: bool = True
-        enable_boundary_snapping: bool = True
-
-        def __post_init__(self):
-            if self.weights:
-                total = sum(self.weights)
+    @model_validator(mode="after")
+    def validate_config(self) -> "UL25Config":
+        # Normalize weights
+        if self.weights:
+            total = sum(self.weights)
+            if total > 0:
                 self.weights = [w / total for w in self.weights]
-            if self.curriculum_start:
-                total = sum(self.curriculum_start)
+        if self.curriculum_start:
+            total = sum(self.curriculum_start)
+            if total > 0:
                 self.curriculum_start = [w / total for w in self.curriculum_start]
-            if self.curriculum_end:
-                total = sum(self.curriculum_end)
+        if self.curriculum_end:
+            total = sum(self.curriculum_end)
+            if total > 0:
                 self.curriculum_end = [w / total for w in self.curriculum_end]
 
-        def get_weights(self, progress: float = 0.0) -> List[float]:
-            """Get interpolated weights based on training progress."""
-            if self.curriculum_start is None or self.curriculum_end is None:
-                return self.weights
-            progress = max(0.0, min(1.0, progress))
-            return [
-                (1 - progress) * s + progress * e
-                for s, e in zip(self.curriculum_start, self.curriculum_end)
-            ]
-
-        @classmethod
-        def recommended(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+        # Validate lengths match
+        n = len(self.denoisers)
+        if self.weights and len(self.weights) != n:
+            raise ValueError(
+                f"weights length ({len(self.weights)}) must match denoisers ({n})"
             )
+        if self.curriculum_start and len(self.curriculum_start) != n:
+            raise ValueError(f"curriculum_start length must match denoisers ({n})")
+        if self.curriculum_end and len(self.curriculum_end) != n:
+            raise ValueError(f"curriculum_end length must match denoisers ({n})")
 
-        @classmethod
-        def recommended_with_curriculum(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
-                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_SHORT, prefix="[S]"),
-                    DenoiserSpec(Task.PREFIX_LONG, prefix="[S]"),
-                    DenoiserSpec(Task.INFILLING, r=0.30, prefix="[I]"),
-                ],
-                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
-                curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
-                curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
-            )
+        return self
 
-        @classmethod
-        def ul2_original(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
-                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
-                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.15, prefix="[X]"),
-                    DenoiserSpec(Task.SPAN, mu=64.0, r=0.15, prefix="[X]"),
-                    DenoiserSpec(Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
-                ],
-                weights=[0.165, 0.165, 0.34, 0.0825, 0.0825, 0.0825, 0.0825],
-            )
+    def get_weights(self, progress: float = 0.0) -> List[float]:
+        """Get interpolated weights based on training progress."""
+        if self.curriculum_start is None or self.curriculum_end is None:
+            return self.weights
 
-        @classmethod
-        def t5_standard(cls) -> "UL25Config":
-            return cls(
-                denoisers=[DenoiserSpec(Task.SPAN, mu=3.0, r=0.15)],
-                weights=[1.0],
-            )
+        progress = max(0.0, min(1.0, progress))
+        return [
+            (1 - progress) * s + progress * e
+            for s, e in zip(self.curriculum_start, self.curriculum_end)
+        ]
 
-        @classmethod
-        def minimal(cls) -> "UL25Config":
-            return cls(
-                denoisers=[
-                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15),
-                    DenoiserSpec(Task.PREFIX_RANDOM),
-                ],
-                weights=[0.5, 0.5],
-            )
+    @classmethod
+    def recommended(cls) -> "UL25Config":
+        """
+        Recommended configuration based on feasibility analysis.
+
+        Mixture:
+        - 30% span denoising (standard + middle-heavy)
+        - 50% prefix LM variants
+        - 20% infilling
+        """
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+            ],
+            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+        )
+
+    @classmethod
+    def recommended_with_curriculum(cls) -> "UL25Config":
+        """
+        Recommended config with curriculum learning.
+
+        Early: More span denoising (easier)
+        Late: More prefix LM (matches inference)
+        """
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+            ],
+            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+            curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
+            curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
+        )
+
+    @classmethod
+    def ul2_original(cls) -> "UL25Config":
+        """Original UL2 7-denoiser mixture."""
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.15, prefix="[X]"),
+                DenoiserSpec(task=Task.SPAN, mu=64.0, r=0.15, prefix="[X]"),
+                DenoiserSpec(task=Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
+            ],
+            weights=[0.165, 0.165, 0.34, 0.0825, 0.0825, 0.0825, 0.0825],
+        )
+
+    @classmethod
+    def t5_standard(cls) -> "UL25Config":
+        """Standard T5 span corruption."""
+        return cls(
+            denoisers=[DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15)],
+            weights=[1.0],
+        )
+
+    @classmethod
+    def minimal(cls) -> "UL25Config":
+        """Minimal config for testing."""
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15),
+                DenoiserSpec(task=Task.PREFIX_RANDOM),
+            ],
+            weights=[0.5, 0.5],
+        )
 
 
 # =============================================================================
 # MASKING FUNCTIONS
 # =============================================================================
 
-if TORCH_AVAILABLE:
 
-    def _random_segmentation(
-        n_items: int, n_segments: int, device: torch.device
-    ) -> Tensor:
-        """Partition n_items into n_segments non-empty segments."""
-        if n_segments <= 0 or n_items <= 0:
-            return torch.ones(1, dtype=torch.long, device=device)
-        if n_segments >= n_items:
-            return torch.ones(n_items, dtype=torch.long, device=device)
+def _random_segmentation(n_items: int, n_segments: int, device: torch.device) -> Tensor:
+    """Partition n_items into n_segments non-empty segments."""
+    if n_segments <= 0 or n_items <= 0:
+        return torch.ones(1, dtype=torch.long, device=device)
+    if n_segments >= n_items:
+        return torch.ones(n_items, dtype=torch.long, device=device)
 
-        dividers = torch.randperm(n_items - 1, device=device)[: n_segments - 1]
-        dividers = torch.sort(dividers).values
+    dividers = torch.randperm(n_items - 1, device=device)[: n_segments - 1]
+    dividers = torch.sort(dividers).values
 
-        starts = torch.cat(
-            [torch.zeros(1, dtype=torch.long, device=device), dividers + 1]
-        )
-        ends = torch.cat(
-            [dividers + 1, torch.tensor([n_items], dtype=torch.long, device=device)]
-        )
+    starts = torch.cat([torch.zeros(1, dtype=torch.long, device=device), dividers + 1])
+    ends = torch.cat(
+        [dividers + 1, torch.tensor([n_items], dtype=torch.long, device=device)]
+    )
 
-        return ends - starts
+    return ends - starts
 
-    def span_corruption_mask(
-        seq_len: int,
-        r: float,
-        mu: float,
-        max_spans: int,
-        device: torch.device,
-    ) -> Tensor:
-        """Generate T5-style span corruption mask."""
-        num_noise = max(1, min(int(round(seq_len * r)), seq_len - 1))
-        num_spans = max(1, min(max_spans, int(round(num_noise / mu))))
-        num_keep = seq_len - num_noise
 
-        noise_lens = _random_segmentation(num_noise, num_spans, device)
-        keep_lens = _random_segmentation(num_keep, num_spans, device)
+def span_corruption_mask(
+    seq_len: int,
+    r: float,
+    mu: float,
+    max_spans: int,
+    device: torch.device,
+) -> Tensor:
+    """Generate T5-style span corruption mask."""
+    num_noise = max(1, min(int(round(seq_len * r)), seq_len - 1))
+    num_spans = max(1, min(max_spans, int(round(num_noise / mu))))
+    num_keep = seq_len - num_noise
 
-        # Interleave segments with random start to avoid edge bias
-        n = min(len(noise_lens), len(keep_lens))
-        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
-        pos = 0
+    noise_lens = _random_segmentation(num_noise, num_spans, device)
+    keep_lens = _random_segmentation(num_keep, num_spans, device)
 
-        # Convert to lists once to avoid repeated .item() calls
-        noise_list = noise_lens.tolist()
-        keep_list = keep_lens.tolist()
+    # Interleave segments with random start to avoid edge bias
+    n = min(len(noise_lens), len(keep_lens))
+    mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    pos = 0
 
-        # Randomize starting pattern to eliminate edge effect at seq end
-        start_with_noise = torch.rand(1, device=device).item() < 0.5
+    # Convert to lists once to avoid repeated .item() calls
+    noise_list = noise_lens.tolist()
+    keep_list = keep_lens.tolist()
 
-        for i in range(n):
-            if start_with_noise:
-                # Noise segment first
-                noise_len = noise_list[i]
-                end = min(pos + noise_len, seq_len)
-                mask[pos:end] = True
-                pos = end
-                # Then keep segment
-                pos += keep_list[i]
-            else:
-                # Keep segment first (original order)
-                pos += keep_list[i]
-                # Then noise segment
-                noise_len = noise_list[i]
-                end = min(pos + noise_len, seq_len)
-                mask[pos:end] = True
-                pos = end
-            if pos >= seq_len:
-                break
+    # Randomize starting pattern to eliminate edge effect at seq end
+    start_with_noise = torch.rand(1, device=device).item() < 0.5
 
-        return mask
+    for i in range(n):
+        if start_with_noise:
+            # Noise segment first
+            noise_len = noise_list[i]
+            end = min(pos + noise_len, seq_len)
+            mask[pos:end] = True
+            pos = end
+            # Then keep segment
+            pos += keep_list[i]
+        else:
+            # Keep segment first (original order)
+            pos += keep_list[i]
+            # Then noise segment
+            noise_len = noise_list[i]
+            end = min(pos + noise_len, seq_len)
+            mask[pos:end] = True
+            pos = end
+        if pos >= seq_len:
+            break
 
-    def middle_heavy_span_mask(
-        seq_len: int,
-        noise_density: float,
-        mean_span_length: float,
-        device: torch.device,
-    ) -> Tensor:
-        """
-        Position-biased SPAN corruption preferring middle positions.
+    return mask
 
-        Unlike the previous implementation that sampled individual tokens,
-        this version samples span START positions with Gaussian weighting,
-        then extends spans. This creates contiguous masked regions for
-        better retrieval training.
 
-        The function ensures the total masked tokens stays close to the
-        target noise_density * seq_len (within a small tolerance).
+def middle_heavy_span_mask(
+    seq_len: int,
+    noise_density: float,
+    mean_span_length: float,
+    device: torch.device,
+) -> Tensor:
+    """
+    Position-biased SPAN corruption preferring middle positions.
 
-        Args:
-            seq_len: Sequence length
-            noise_density: Target fraction of tokens to mask (r)
-            mean_span_length: Average span length (mu)
-            device: Torch device
+    Unlike the previous implementation that sampled individual tokens,
+    this version samples span START positions with Gaussian weighting,
+    then extends spans. This creates contiguous masked regions for
+    better retrieval training.
 
-        Returns:
-            Boolean tensor [seq_len] where True = corrupted/masked
-        """
-        num_noise = max(1, min(int(round(seq_len * noise_density)), seq_len - 1))
-        num_spans = max(1, int(round(num_noise / mean_span_length)))
+    The function ensures the total masked tokens stays close to the
+    target noise_density * seq_len (within a small tolerance).
 
-        # Gaussian weights for span START positions (prefer middle)
-        positions = torch.arange(seq_len, dtype=torch.float32, device=device)
-        center = seq_len / 2
-        sigma = seq_len / 4
-        weights = torch.exp(-0.5 * ((positions - center) / sigma) ** 2)
+    Args:
+        seq_len: Sequence length
+        noise_density: Target fraction of tokens to mask (r)
+        mean_span_length: Average span length (mu)
+        device: Torch device
 
-        # Don't start spans too close to end (leave room for span extension)
-        cutoff = max(1, int(0.9 * seq_len))
+    Returns:
+        Boolean tensor [seq_len] where True = corrupted/masked
+    """
+    num_noise = max(1, min(int(round(seq_len * noise_density)), seq_len - 1))
+    num_spans = max(1, int(round(num_noise / mean_span_length)))
+
+    # Gaussian weights for span START positions (prefer middle)
+    positions = torch.arange(seq_len, dtype=torch.float32, device=device)
+    center = seq_len / 2
+    sigma = seq_len / 4
+    weights = torch.exp(-0.5 * ((positions - center) / sigma) ** 2)
+
+    # Don't start spans too close to end (leave room for span extension)
+    cutoff = max(1, int(0.9 * seq_len))
+    weights[cutoff:] = 0
+
+    # Ensure weights sum to 1
+    if weights.sum() < 1e-8:
+        weights = torch.ones(seq_len, dtype=torch.float32, device=device)
         weights[cutoff:] = 0
+    weights = weights / weights.sum()
 
-        # Ensure weights sum to 1
-        if weights.sum() < 1e-8:
-            weights = torch.ones(seq_len, dtype=torch.float32, device=device)
-            weights[cutoff:] = 0
-        weights = weights / weights.sum()
+    # Sample span start positions (without replacement)
+    max_possible_spans = min(num_spans, seq_len // 2, cutoff)
+    if max_possible_spans < 1:
+        max_possible_spans = 1
 
-        # Sample span start positions (without replacement)
-        max_possible_spans = min(num_spans, seq_len // 2, cutoff)
-        if max_possible_spans < 1:
-            max_possible_spans = 1
+    starts = torch.multinomial(weights, max_possible_spans, replacement=False)
+    starts = torch.sort(starts).values
 
-        starts = torch.multinomial(weights, max_possible_spans, replacement=False)
-        starts = torch.sort(starts).values
+    # Generate span lengths using Poisson distribution
+    avg_span_len = max(1.0, num_noise / max_possible_spans)
+    span_lens = torch.poisson(
+        torch.full((len(starts),), avg_span_len, device=device)
+    ).long()
+    span_lens = torch.clamp(span_lens, min=1, max=max(1, seq_len // max_possible_spans))
 
-        # Generate span lengths using Poisson distribution
-        avg_span_len = max(1.0, num_noise / max_possible_spans)
-        span_lens = torch.poisson(
-            torch.full((len(starts),), avg_span_len, device=device)
-        ).long()
-        span_lens = torch.clamp(
-            span_lens, min=1, max=max(1, seq_len // max_possible_spans)
-        )
+    # Create mask by extending spans from start positions
+    mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
 
-        # Create mask by extending spans from start positions
-        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    starts_list = starts.tolist()
+    lens_list = span_lens.tolist()
 
-        starts_list = starts.tolist()
-        lens_list = span_lens.tolist()
+    # Track occupied positions and remaining budget
+    occupied = set()
+    tokens_masked = 0
 
-        # Track occupied positions and remaining budget
-        occupied = set()
-        tokens_masked = 0
+    for start, length in zip(starts_list, lens_list):
+        # Check remaining budget - stop if we've reached target
+        remaining_budget = num_noise - tokens_masked
+        if remaining_budget <= 0:
+            break
 
-        for start, length in zip(starts_list, lens_list):
-            # Check remaining budget - stop if we've reached target
-            remaining_budget = num_noise - tokens_masked
-            if remaining_budget <= 0:
-                break
+        # Cap span length to remaining budget
+        length = min(length, remaining_budget)
 
-            # Cap span length to remaining budget
-            length = min(length, remaining_budget)
+        # Extend span, respecting boundaries and avoiding overlaps
+        end = min(start + length, seq_len)
+        # Check if any position in range is already occupied
+        span_positions = set(range(start, end))
+        if not span_positions & occupied:
+            actual_len = end - start
+            # Only add if it doesn't exceed budget
+            if tokens_masked + actual_len <= num_noise:
+                mask[start:end] = True
+                occupied.update(span_positions)
+                tokens_masked += actual_len
+            elif remaining_budget > 0:
+                # Truncate span to fit budget
+                truncated_end = start + remaining_budget
+                if truncated_end > start:
+                    truncated_positions = set(range(start, truncated_end))
+                    if not truncated_positions & occupied:
+                        mask[start:truncated_end] = True
+                        occupied.update(truncated_positions)
+                        tokens_masked += truncated_end - start
 
-            # Extend span, respecting boundaries and avoiding overlaps
-            end = min(start + length, seq_len)
-            # Check if any position in range is already occupied
-            span_positions = set(range(start, end))
-            if not span_positions & occupied:
-                actual_len = end - start
-                # Only add if it doesn't exceed budget
-                if tokens_masked + actual_len <= num_noise:
-                    mask[start:end] = True
-                    occupied.update(span_positions)
-                    tokens_masked += actual_len
-                elif remaining_budget > 0:
-                    # Truncate span to fit budget
-                    truncated_end = start + remaining_budget
-                    if truncated_end > start:
-                        truncated_positions = set(range(start, truncated_end))
-                        if not truncated_positions & occupied:
-                            mask[start:truncated_end] = True
-                            occupied.update(truncated_positions)
-                            tokens_masked += truncated_end - start
+    # If we haven't reached target noise, fill in more from high-weight positions
+    current_noise = mask.sum().item()
+    if current_noise < num_noise:
+        remaining = num_noise - current_noise
+        # Get unmasked positions weighted by original Gaussian
+        unmasked_weights = weights.clone()
+        unmasked_weights[mask] = 0
+        if unmasked_weights.sum() > 1e-8:
+            unmasked_weights = unmasked_weights / unmasked_weights.sum()
+            extra_count = min(int(remaining), int((~mask).sum().item()))
+            if extra_count > 0:
+                extra_indices = torch.multinomial(
+                    unmasked_weights, extra_count, replacement=False
+                )
+                mask[extra_indices] = True
 
-        # If we haven't reached target noise, fill in more from high-weight positions
-        current_noise = mask.sum().item()
-        if current_noise < num_noise:
-            remaining = num_noise - current_noise
-            # Get unmasked positions weighted by original Gaussian
-            unmasked_weights = weights.clone()
-            unmasked_weights[mask] = 0
-            if unmasked_weights.sum() > 1e-8:
-                unmasked_weights = unmasked_weights / unmasked_weights.sum()
-                extra_count = min(int(remaining), int((~mask).sum().item()))
-                if extra_count > 0:
-                    extra_indices = torch.multinomial(
-                        unmasked_weights, extra_count, replacement=False
-                    )
-                    mask[extra_indices] = True
+    return mask
 
-        return mask
 
-    def prefix_lm_mask(
-        seq_len: int, mode: str, device: torch.device
-    ) -> Tuple[Tensor, int]:
-        """Generate prefix LM mask with various split strategies."""
-        if mode == "random":
-            split = torch.randint(
-                int(0.2 * seq_len), int(0.8 * seq_len) + 1, (1,), device=device
-            ).item()
-        elif mode == "short":
-            frac = 0.05 + 0.10 * torch.rand(1, device=device).item()
-            split = int((1 - frac) * seq_len)
-        elif mode == "long":
-            frac = 0.05 + 0.15 * torch.rand(1, device=device).item()
-            split = int(frac * seq_len)
-        else:
-            split = int(0.75 * seq_len)
+def prefix_lm_mask(seq_len: int, mode: str, device: torch.device) -> Tuple[Tensor, int]:
+    """Generate prefix LM mask with various split strategies."""
+    if mode == "random":
+        split = torch.randint(
+            int(0.2 * seq_len), int(0.8 * seq_len) + 1, (1,), device=device
+        ).item()
+    elif mode == "short":
+        frac = 0.05 + 0.10 * torch.rand(1, device=device).item()
+        split = int((1 - frac) * seq_len)
+    elif mode == "long":
+        frac = 0.05 + 0.15 * torch.rand(1, device=device).item()
+        split = int(frac * seq_len)
+    else:
+        split = int(0.75 * seq_len)
 
-        split = max(1, min(split, seq_len - 1))
-        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
-        mask[split:] = True
-        return mask, split
+    split = max(1, min(split, seq_len - 1))
+    mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    mask[split:] = True
+    return mask, split
 
-    def infilling_mask(
-        seq_len: int, hole_frac: float, device: torch.device
-    ) -> Tuple[Tensor, int, int]:
-        """Generate infilling mask (mask middle portion)."""
-        hole_size = max(1, int(hole_frac * seq_len))
-        min_start = int(0.1 * seq_len)
-        max_start = max(min_start, int(0.9 * seq_len) - hole_size)
 
-        if max_start <= min_start:
-            hole_start = seq_len // 3
-        else:
-            hole_start = torch.randint(
-                min_start, max_start + 1, (1,), device=device
-            ).item()
+def infilling_mask(
+    seq_len: int, hole_frac: float, device: torch.device
+) -> Tuple[Tensor, int, int]:
+    """Generate infilling mask (mask middle portion)."""
+    hole_size = max(1, int(hole_frac * seq_len))
+    min_start = int(0.1 * seq_len)
+    max_start = max(min_start, int(0.9 * seq_len) - hole_size)
 
-        hole_end = min(hole_start + hole_size, seq_len)
+    if max_start <= min_start:
+        hole_start = seq_len // 3
+    else:
+        hole_start = torch.randint(min_start, max_start + 1, (1,), device=device).item()
 
-        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
-        mask[hole_start:hole_end] = True
-        return mask, hole_start, hole_end
+    hole_end = min(hole_start + hole_size, seq_len)
 
-    def snap_mask_to_word_boundaries(
-        mask: Tensor,
-        input_ids: Tensor,
-        tokenizer: Any,
-    ) -> Tensor:
-        """
-        Snap mask boundaries to word/token boundaries.
+    mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    mask[hole_start:hole_end] = True
+    return mask, hole_start, hole_end
 
-        This adjusts span starts to align with word-initial tokens (those starting
-        with space, Ġ for GPT-style, or ▁ for SentencePiece). This makes the
-        corruption more semantically meaningful.
 
-        Args:
-            mask: Boolean mask tensor [seq_len]
-            input_ids: Token IDs tensor [seq_len]
-            tokenizer: Tokenizer with convert_ids_to_tokens method
+def snap_mask_to_word_boundaries(
+    mask: Tensor,
+    input_ids: Tensor,
+    tokenizer: Any,
+) -> Tensor:
+    """
+    Snap mask boundaries to word/token boundaries.
 
-        Returns:
-            Adjusted mask tensor [seq_len]
-        """
-        device = mask.device
-        seq_len = mask.shape[0]
+    This adjusts span starts to align with word-initial tokens (those starting
+    with space, Ġ for GPT-style, or ▁ for SentencePiece). This makes the
+    corruption more semantically meaningful.
 
-        # Detect word-start tokens
-        is_word_start = torch.zeros(seq_len, dtype=torch.bool, device=device)
-        is_word_start[0] = True  # First token is always a boundary
+    Args:
+        mask: Boolean mask tensor [seq_len]
+        input_ids: Token IDs tensor [seq_len]
+        tokenizer: Tokenizer with convert_ids_to_tokens method
 
-        for i in range(1, seq_len):
-            try:
-                token = tokenizer.convert_ids_to_tokens(input_ids[i].item())
-                if token is None:
-                    continue
-                # SentencePiece uses ▁, BPE uses Ġ or leading space
-                if (
-                    token.startswith("▁")
-                    or token.startswith("Ġ")
-                    or token.startswith(" ")
-                    or token.startswith("<")  # Special tokens
-                ):
-                    is_word_start[i] = True
-            except Exception:
+    Returns:
+        Adjusted mask tensor [seq_len]
+    """
+    device = mask.device
+    seq_len = mask.shape[0]
+
+    # Detect word-start tokens
+    is_word_start = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    is_word_start[0] = True  # First token is always a boundary
+
+    for i in range(1, seq_len):
+        try:
+            token = tokenizer.convert_ids_to_tokens(input_ids[i].item())
+            if token is None:
                 continue
+            # SentencePiece uses ▁, BPE uses Ġ or leading space
+            if (
+                token.startswith("▁")
+                or token.startswith("Ġ")
+                or token.startswith(" ")
+                or token.startswith("<")  # Special tokens
+            ):
+                is_word_start[i] = True
+        except Exception:
+            continue
 
-        # Find span starts in current mask (False -> True transitions)
-        shifted = torch.cat(
-            [torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]]
+    # Find span starts in current mask (False -> True transitions)
+    shifted = torch.cat([torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]])
+    span_starts = mask & ~shifted
+
+    new_mask = mask.clone()
+    start_indices = span_starts.nonzero().squeeze(-1)
+
+    if start_indices.dim() == 0:
+        start_indices = start_indices.unsqueeze(0)
+
+    for idx in start_indices.tolist():
+        if is_word_start[idx]:
+            continue  # Already aligned
+
+        # Find next word boundary >= idx
+        candidates = is_word_start[idx:].nonzero()
+        if len(candidates) > 0:
+            offset = candidates[0].item()
+            new_start = idx + offset
+
+            # Don't snap too far (max 3 tokens)
+            if new_start > idx and new_start - idx <= 3:
+                # Clear positions between old start and new start
+                new_mask[idx:new_start] = False
+
+    return new_mask
+
+
+def create_sentinel_ids(mask: Tensor, sentinel_start: int) -> Tensor:
+    """Convert boolean mask to sentinel token IDs."""
+    device = mask.device
+
+    shifted = torch.cat([torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]])
+    span_starts = mask & ~shifted
+
+    cumsum = torch.cumsum(span_starts.int(), dim=0)
+    sentinel_ids = torch.where(
+        span_starts, sentinel_start - cumsum + 1, torch.zeros_like(cumsum)
+    )
+
+    continuations = mask & ~span_starts
+    sentinel_ids = torch.where(
+        continuations, torch.full_like(sentinel_ids, -1), sentinel_ids
+    )
+
+    return sentinel_ids
+
+
+def apply_sentinel_mask(
+    input_ids: Tensor,
+    sentinel_ids: Tensor,
+    prefix_ids: Optional[Tensor] = None,
+    eos_id: Optional[int] = None,
+) -> Tensor:
+    """Apply sentinel mask to input_ids."""
+    device = input_ids.device
+
+    result = torch.where(sentinel_ids > 0, sentinel_ids, input_ids)
+    result = result[sentinel_ids != -1]
+
+    if prefix_ids is not None and prefix_ids.numel() > 0:
+        result = torch.cat([prefix_ids.to(device), result])
+
+    if eos_id is not None:
+        result = torch.cat(
+            [result, torch.tensor([eos_id], dtype=result.dtype, device=device)]
         )
-        span_starts = mask & ~shifted
 
-        new_mask = mask.clone()
-        start_indices = span_starts.nonzero().squeeze(-1)
-
-        if start_indices.dim() == 0:
-            start_indices = start_indices.unsqueeze(0)
-
-        for idx in start_indices.tolist():
-            if is_word_start[idx]:
-                continue  # Already aligned
-
-            # Find next word boundary >= idx
-            candidates = is_word_start[idx:].nonzero()
-            if len(candidates) > 0:
-                offset = candidates[0].item()
-                new_start = idx + offset
-
-                # Don't snap too far (max 3 tokens)
-                if new_start > idx and new_start - idx <= 3:
-                    # Clear positions between old start and new start
-                    new_mask[idx:new_start] = False
-
-        return new_mask
-
-    def create_sentinel_ids(mask: Tensor, sentinel_start: int) -> Tensor:
-        """Convert boolean mask to sentinel token IDs."""
-        device = mask.device
-
-        shifted = torch.cat(
-            [torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]]
-        )
-        span_starts = mask & ~shifted
-
-        cumsum = torch.cumsum(span_starts.int(), dim=0)
-        sentinel_ids = torch.where(
-            span_starts, sentinel_start - cumsum + 1, torch.zeros_like(cumsum)
-        )
-
-        continuations = mask & ~span_starts
-        sentinel_ids = torch.where(
-            continuations, torch.full_like(sentinel_ids, -1), sentinel_ids
-        )
-
-        return sentinel_ids
-
-    def apply_sentinel_mask(
-        input_ids: Tensor,
-        sentinel_ids: Tensor,
-        prefix_ids: Optional[Tensor] = None,
-        eos_id: Optional[int] = None,
-    ) -> Tensor:
-        """Apply sentinel mask to input_ids."""
-        device = input_ids.device
-
-        result = torch.where(sentinel_ids > 0, sentinel_ids, input_ids)
-        result = result[sentinel_ids != -1]
-
-        if prefix_ids is not None and prefix_ids.numel() > 0:
-            result = torch.cat([prefix_ids.to(device), result])
-
-        if eos_id is not None:
-            result = torch.cat(
-                [result, torch.tensor([eos_id], dtype=result.dtype, device=device)]
-            )
-
-        return result
+    return result
 
 
 # =============================================================================
@@ -760,7 +612,7 @@ if TORCH_AVAILABLE:
 # =============================================================================
 
 
-class UL25DataCollator(DataCollatorMixin if HF_AVAILABLE else object):
+class UL25DataCollator(DataCollatorMixin):
     """
     UL2.5 Data Collator for encoder-decoder models.
 
@@ -793,9 +645,6 @@ class UL25DataCollator(DataCollatorMixin if HF_AVAILABLE else object):
         pad_to_multiple_of: Optional[int] = None,
         return_tensors: str = "pt",
     ):
-        if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch is required. Install with: pip install torch")
-
         self.tokenizer = tokenizer
         self.config = config or UL25Config.recommended()
         self.max_length = max_length
@@ -1146,19 +995,13 @@ def create_ul25_collator(
 
 
 def _test():
-    """Run tests if torch is available."""
-    if not TORCH_AVAILABLE:
-        print("PyTorch not available. Skipping tests.")
-        return
-
+    """Run tests."""
     print("=" * 60)
     print("UL2.5 HuggingFace Collator - Tests")
     print("=" * 60)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    print(f"Pydantic available: {PYDANTIC_AVAILABLE}\n")
-
     # Test masking functions
     print("[TEST] Masking functions")
     seq_len = 100
@@ -1228,9 +1071,7 @@ def _test():
 
     # Test curriculum
     print("\n[TEST] Curriculum")
-    collator = UL25DataCollator(
-        tokenizer, UL25Config.recommended_with_curriculum()
-    )
+    collator = UL25DataCollator(tokenizer, UL25Config.recommended_with_curriculum())
     collator.progress = 0.0
     w0 = collator.config.get_weights(0.0)
     collator.progress = 1.0
@@ -1253,9 +1094,7 @@ def _test():
         batch_weights = batch_collator._get_length_adaptive_weights_batch(
             mixed_seq_lens
         )
-        short_expected = batch_collator._get_length_adaptive_weights(
-            mixed_seq_lens[0]
-        )
+        short_expected = batch_collator._get_length_adaptive_weights(mixed_seq_lens[0])
         long_expected = batch_collator._get_length_adaptive_weights(mixed_seq_lens[1])
         assert torch.allclose(batch_weights[0], short_expected)
         assert torch.allclose(batch_weights[1], long_expected)
