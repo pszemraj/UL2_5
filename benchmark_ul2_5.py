@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import torch
 from transformers import AutoTokenizer
 
+import numpy as np
+
 from ul2_5_hf import (
     UL25Config,
     UL25DataCollator,
@@ -18,6 +20,7 @@ from ul2_5_hf import (
     infilling_mask,
     middle_heavy_span_mask,
     prefix_lm_mask,
+    snap_mask_to_word_boundaries,
     span_corruption_mask,
 )
 
@@ -411,6 +414,425 @@ def test_real_tokenizer():
 # =============================================================================
 
 
+def visualize_length_adaptive_weights(device: torch.device):
+    """Visualize how task weights change with sequence length."""
+    print("\n[VIZ] Length-adaptive weights")
+
+    class MockTokenizer:
+        eos_token_id = 1
+        pad_token_id = 0
+        all_special_tokens = [f"<extra_id_{i}>" for i in range(100)]
+        all_special_ids = list(range(32000, 32100))
+        unk_token_id = 0
+
+        def encode(self, text, add_special_tokens=False):
+            return [ord(c) for c in text[:10]]
+
+    tokenizer = MockTokenizer()
+    config = UL25Config.recommended()
+    collator = UL25DataCollator(tokenizer, config)
+
+    seq_lens = [128, 256, 512, 1024, 2048, 4096, 8192]
+    n_tasks = len(config.denoisers)
+
+    # Build weight matrix [seq_lens × tasks]
+    weight_matrix = np.zeros((len(seq_lens), n_tasks))
+    for i, sl in enumerate(seq_lens):
+        weights = collator._get_length_adaptive_weights(sl)
+        weight_matrix[i] = weights.numpy()
+
+    # Task labels
+    task_labels = []
+    for d in config.denoisers:
+        label = d.task.name
+        if d.prefix:
+            label += f" {d.prefix}"
+        if d.task.name == "SPAN":
+            label += f" μ={d.mu}"
+        task_labels.append(label)
+
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor="#1a1a2e")
+    ax.set_facecolor("#16213e")
+
+    im = ax.imshow(weight_matrix, aspect="auto", cmap="viridis")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Weight", color="white")
+    cbar.ax.yaxis.set_tick_params(color="white")
+    plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="white")
+
+    ax.set_xticks(range(n_tasks))
+    ax.set_xticklabels(task_labels, rotation=45, ha="right", fontsize=9)
+    ax.set_yticks(range(len(seq_lens)))
+    ax.set_yticklabels(seq_lens)
+
+    ax.set_xlabel("Task", color="white")
+    ax.set_ylabel("Sequence Length", color="white")
+    ax.set_title(
+        "Length-Adaptive Task Weights\n(PREFIX/INFILLING boosted for long sequences)",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.tick_params(colors="white")
+
+    for spine in ax.spines.values():
+        spine.set_color("#444")
+
+    # Annotate threshold
+    threshold_idx = seq_lens.index(1024)
+    ax.axhline(y=threshold_idx - 0.5, color="#ff6b6b", linestyle="--", linewidth=2)
+    ax.text(
+        n_tasks - 0.5,
+        threshold_idx - 0.7,
+        "← boost starts at 1024",
+        color="#ff6b6b",
+        ha="right",
+        fontsize=9,
+    )
+
+    plt.tight_layout()
+    out_path = FIGURES_DIR / "length_adaptive_weights.png"
+    plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
+    plt.close()
+    print(f"  Saved: {out_path}")
+
+
+def visualize_span_contiguity(device: torch.device):
+    """Visualize that middle-heavy mask creates contiguous spans, not scattered tokens."""
+    print("\n[VIZ] Middle-heavy span contiguity")
+
+    seq_len = 100
+    n_samples = 500
+
+    # Collect statistics
+    span_counts = []
+    span_lengths = []
+    span_starts = []
+
+    for _ in range(n_samples):
+        mask = middle_heavy_span_mask(seq_len, 0.20, 12.0, device)
+        mask_cpu = mask.cpu()
+
+        # Count spans
+        shifted = torch.cat([torch.zeros(1, dtype=torch.bool), mask_cpu[:-1]])
+        starts = (mask_cpu & ~shifted).nonzero().squeeze(-1)
+        n_spans = len(starts) if starts.dim() > 0 else (1 if starts.numel() > 0 else 0)
+        span_counts.append(n_spans)
+
+        # Measure span lengths
+        if starts.numel() > 0:
+            starts_list = starts.tolist() if starts.dim() > 0 else [starts.item()]
+            for start in starts_list:
+                length = 0
+                for j in range(start, seq_len):
+                    if mask_cpu[j]:
+                        length += 1
+                    else:
+                        break
+                span_lengths.append(length)
+                span_starts.append(start)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), facecolor="#1a1a2e")
+
+    # Panel 1: Example mask with colored spans
+    ax = axes[0]
+    ax.set_facecolor("#16213e")
+    mask = middle_heavy_span_mask(seq_len, 0.20, 12.0, device).cpu()
+    shifted = torch.cat([torch.zeros(1, dtype=torch.bool), mask[:-1]])
+    starts = (mask & ~shifted).nonzero().squeeze(-1)
+    starts_list = (
+        starts.tolist()
+        if starts.dim() > 0
+        else ([starts.item()] if starts.numel() > 0 else [])
+    )
+
+    colors_cycle = ["#ff6b6b", "#ffd93d", "#6bcb77", "#00d9ff", "#9b59b6", "#e74c3c"]
+    bar_colors = ["#16213e"] * seq_len
+    span_id = 0
+    in_span = False
+    for i in range(seq_len):
+        if mask[i] and not in_span:
+            in_span = True
+            current_color = colors_cycle[span_id % len(colors_cycle)]
+            span_id += 1
+        elif not mask[i]:
+            in_span = False
+        if mask[i]:
+            bar_colors[i] = current_color
+
+    ax.bar(range(seq_len), [1] * seq_len, color=bar_colors, width=1.0)
+    ax.set_title(
+        f"Example: {len(starts_list)} contiguous spans\n(colors = different spans)",
+        color="white",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_xlabel("Position", color="white")
+    ax.set_yticks([])
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    # Panel 2: Histogram of span lengths
+    ax = axes[1]
+    ax.set_facecolor("#16213e")
+    ax.hist(span_lengths, bins=20, color="#00d9ff", alpha=0.8, edgecolor="white")
+    ax.axvline(np.mean(span_lengths), color="#ff6b6b", linestyle="--", linewidth=2)
+    ax.set_title(
+        f"Span Length Distribution\n(mean={np.mean(span_lengths):.1f})",
+        color="white",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_xlabel("Span Length", color="white")
+    ax.set_ylabel("Count", color="white")
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_color("#444")
+    ax.grid(True, alpha=0.2, color="white")
+
+    # Panel 3: Scatter of span start positions (should show Gaussian bias)
+    ax = axes[2]
+    ax.set_facecolor("#16213e")
+    ax.scatter(span_starts, span_lengths, alpha=0.3, c="#00d9ff", s=10)
+    ax.axvline(seq_len / 2, color="#ff6b6b", linestyle="--", linewidth=2)
+    ax.set_title(
+        "Span Position Bias\n(more spans near middle)",
+        color="white",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_xlabel("Span Start Position", color="white")
+    ax.set_ylabel("Span Length", color="white")
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_color("#444")
+    ax.grid(True, alpha=0.2, color="white")
+
+    plt.suptitle(
+        f"Middle-Heavy Span Analysis (n={n_samples} samples)\n"
+        f"avg {np.mean(span_counts):.1f} spans per sample, NOT scattered tokens",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    out_path = FIGURES_DIR / "middle_heavy_span_analysis.png"
+    plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
+    plt.close()
+    print(f"  Saved: {out_path}")
+
+
+def visualize_boundary_snapping():
+    """Visualize before/after boundary snapping effect."""
+    print("\n[VIZ] Boundary snapping")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "google/t5-v1_1-small", use_fast=False
+        )
+    except Exception as e:
+        print(f"  Skipping: {e}")
+        return
+
+    text = "The quick brown fox jumps over the lazy dog and runs away quickly."
+    input_ids = tokenizer(text, return_tensors="pt")["input_ids"].squeeze(0)
+    seq_len = len(input_ids)
+
+    # Get tokens for word boundary detection
+    tokens = tokenizer.convert_ids_to_tokens(input_ids.tolist())
+
+    # Detect word boundaries
+    word_boundaries = [0]
+    for i in range(1, seq_len):
+        tok = tokens[i]
+        if tok and (tok.startswith("▁") or tok.startswith(" ") or tok.startswith("<")):
+            word_boundaries.append(i)
+
+    # Generate mask on CPU
+    device = torch.device("cpu")
+    torch.manual_seed(42)  # For reproducibility
+    original_mask = span_corruption_mask(seq_len, 0.25, 3.0, 512, device)
+
+    # Apply boundary snapping
+    snapped_mask = snap_mask_to_word_boundaries(original_mask, input_ids, tokenizer)
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8), facecolor="#1a1a2e")
+
+    # Panel 1: Original mask
+    ax = axes[0]
+    ax.set_facecolor("#16213e")
+    colors = ["#00d9ff" if not m else "#ff6b6b" for m in original_mask.tolist()]
+    ax.bar(range(seq_len), [1] * seq_len, color=colors, width=1.0)
+    for wb in word_boundaries:
+        ax.axvline(wb - 0.5, color="#ffd93d", linestyle="-", linewidth=1, alpha=0.7)
+    orig_density = original_mask.float().mean().item()
+    ax.set_title(
+        f"Original Mask (density={orig_density:.1%})",
+        color="white",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_yticks([])
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    # Panel 2: Snapped mask
+    ax = axes[1]
+    ax.set_facecolor("#16213e")
+    colors = ["#00d9ff" if not m else "#ff6b6b" for m in snapped_mask.tolist()]
+    ax.bar(range(seq_len), [1] * seq_len, color=colors, width=1.0)
+    for wb in word_boundaries:
+        ax.axvline(wb - 0.5, color="#ffd93d", linestyle="-", linewidth=1, alpha=0.7)
+    snap_density = snapped_mask.float().mean().item()
+    ax.set_title(
+        f"After Boundary Snapping (density={snap_density:.1%})",
+        color="white",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_yticks([])
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    # Panel 3: Token labels
+    ax = axes[2]
+    ax.set_facecolor("#16213e")
+    ax.bar(range(seq_len), [1] * seq_len, color="#16213e", width=1.0)
+    for i, tok in enumerate(tokens):
+        color = "#ffd93d" if i in word_boundaries else "#888888"
+        ax.text(
+            i,
+            0.5,
+            tok[:6] if tok else "",
+            ha="center",
+            va="center",
+            fontsize=7,
+            color=color,
+            rotation=90,
+        )
+    ax.set_title(
+        "Tokens (yellow = word boundary)",
+        color="white",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_yticks([])
+    ax.set_xlim(-0.5, seq_len - 0.5)
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    axes[-1].set_xlabel(
+        "Position (blue=kept, red=masked, yellow lines=word boundaries)", color="white"
+    )
+    plt.suptitle(
+        "Span Boundary Snapping\n(aligns span starts to word-initial tokens)",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    out_path = FIGURES_DIR / "boundary_snapping_comparison.png"
+    plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
+    plt.close()
+    print(f"  Saved: {out_path}")
+
+
+def visualize_curriculum_progression():
+    """Visualize curriculum learning weight progression over training."""
+    print("\n[VIZ] Curriculum progression")
+
+    config = UL25Config.recommended_with_curriculum()
+    progress_values = np.linspace(0, 1, 21)
+
+    # Task labels
+    task_labels = []
+    for d in config.denoisers:
+        label = d.task.name
+        if d.prefix:
+            label += f" {d.prefix}"
+        if d.task.name == "SPAN" and d.mu != 3.0:
+            label += f" μ={d.mu}"
+        task_labels.append(label)
+
+    # Collect weights at each progress point
+    n_tasks = len(config.denoisers)
+    weight_curves = np.zeros((n_tasks, len(progress_values)))
+    for i, p in enumerate(progress_values):
+        weights = config.get_weights(p)
+        weight_curves[:, i] = weights
+
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor="#1a1a2e")
+    ax.set_facecolor("#16213e")
+
+    colors = [
+        "#ff6b6b",
+        "#ffd93d",
+        "#6bcb77",
+        "#00d9ff",
+        "#9b59b6",
+        "#e74c3c",
+        "#3498db",
+    ]
+    for i in range(n_tasks):
+        ax.plot(
+            progress_values,
+            weight_curves[i],
+            label=task_labels[i],
+            color=colors[i % len(colors)],
+            linewidth=2,
+            marker="o",
+            markersize=4,
+        )
+
+    ax.set_xlabel("Training Progress", color="white")
+    ax.set_ylabel("Task Weight", color="white")
+    ax.set_title(
+        "Curriculum Learning: Task Weight Progression\n(span-heavy early → prefix-heavy late)",
+        color="white",
+        fontsize=12,
+        fontweight="bold",
+    )
+    ax.tick_params(colors="white")
+    ax.legend(
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        facecolor="#16213e",
+        edgecolor="white",
+        labelcolor="white",
+        fontsize=9,
+    )
+
+    for spine in ax.spines.values():
+        spine.set_color("#444")
+    ax.grid(True, alpha=0.2, color="white")
+
+    # Annotate phases
+    ax.annotate(
+        "Span-heavy\n(easier)",
+        xy=(0.05, 0.22),
+        color="#ff6b6b",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.annotate(
+        "Prefix-heavy\n(realistic)",
+        xy=(0.85, 0.22),
+        color="#00d9ff",
+        fontsize=10,
+        fontweight="bold",
+    )
+
+    plt.tight_layout()
+    out_path = FIGURES_DIR / "curriculum_progression.png"
+    plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
+    plt.close()
+    print(f"  Saved: {out_path}")
+
+
 def create_visualizations(device: torch.device):
     """Generate visualization plots."""
     print("\n" + "=" * 60)
@@ -553,6 +975,18 @@ def create_visualizations(device: torch.device):
     plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
     plt.close()
     print(f"  Saved: {out_path}")
+
+    # 4. Length-adaptive weights
+    visualize_length_adaptive_weights(device)
+
+    # 5. Middle-heavy span contiguity
+    visualize_span_contiguity(device)
+
+    # 6. Boundary snapping
+    visualize_boundary_snapping()
+
+    # 7. Curriculum progression
+    visualize_curriculum_progression()
 
 
 # =============================================================================
