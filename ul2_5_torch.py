@@ -9,6 +9,11 @@ Features:
 - Follows HuggingFace DataCollatorMixin pattern
 - Vectorized operations where possible
 - Compatible with Trainer and DataLoader
+- Pydantic-based configuration validation
+- Fixed middle-heavy span corruption (creates actual spans)
+- Span boundary snapping to word boundaries
+- Length-adaptive task selection
+- Curriculum learning support
 
 Usage:
     from ul2_5_torch import UL25DataCollator, UL25Config
@@ -30,16 +35,22 @@ Usage:
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
 
+try:
+    from pydantic import BaseModel, Field, field_validator, model_validator
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AVAILABLE = False
+    BaseModel = object
+
 
 # =============================================================================
-# CONFIGURATION
+# CONFIGURATION (Pydantic-based)
 # =============================================================================
 
 
@@ -47,78 +58,275 @@ class Task(IntEnum):
     """Task types as integers for efficient torch operations."""
 
     SPAN = 0  # Standard T5-style span corruption
-    SPAN_MIDDLE = 1  # Position-biased toward middle
+    SPAN_MIDDLE = 1  # Position-biased toward middle (creates actual spans)
     PREFIX_RANDOM = 2  # Random split (20-80%)
     PREFIX_SHORT = 3  # Long prefix, short target
     PREFIX_LONG = 4  # Short prefix, long target
     INFILLING = 5  # Middle-out masking
 
 
-@dataclass
-class DenoiserSpec:
-    """Single denoiser specification."""
+if PYDANTIC_AVAILABLE:
 
-    task: Task
-    mu: float = 3.0  # Mean span length
-    r: float = 0.15  # Noise density
-    max_spans: int = 512
-    prefix: str = ""
-    variable_r: bool = False
-    r_bounds: Tuple[float, float] = (0.05, 0.50)
+    class DenoiserSpec(BaseModel):
+        """Single denoiser specification with validation."""
 
-
-@dataclass
-class UL25Config:
-    """UL2.5 mixture configuration."""
-
-    denoisers: List[DenoiserSpec] = field(default_factory=list)
-    weights: List[float] = field(default_factory=list)
-
-    def __post_init__(self):
-        if self.weights:
-            total = sum(self.weights)
-            self.weights = [w / total for w in self.weights]
-
-    @classmethod
-    def recommended(cls) -> "UL25Config":
-        """Recommended mixture based on feasibility analysis."""
-        return cls(
-            denoisers=[
-                DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                DenoiserSpec(Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
-                DenoiserSpec(Task.SPAN_MIDDLE, mu=16.0, r=0.20, prefix="[X]"),
-                DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-                DenoiserSpec(Task.PREFIX_SHORT, prefix="[S]"),
-                DenoiserSpec(Task.PREFIX_LONG, prefix="[S]"),
-                DenoiserSpec(Task.INFILLING, r=0.30, prefix="[I]"),
-            ],
-            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+        task: Task
+        mu: float = Field(default=3.0, gt=0, description="Mean span length")
+        r: float = Field(default=0.15, ge=0.01, le=0.99, description="Noise density")
+        max_spans: int = Field(default=512, gt=0, description="Maximum number of spans")
+        prefix: str = Field(default="", description="Task prefix token")
+        variable_r: bool = Field(default=False, description="Sample r from bounds")
+        r_bounds: Tuple[float, float] = Field(
+            default=(0.05, 0.50), description="Bounds for variable r"
         )
 
-    @classmethod
-    def span_heavy(cls) -> "UL25Config":
-        """Original UL2-style with more span denoising."""
-        return cls(
-            denoisers=[
-                DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
-                DenoiserSpec(Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
-                DenoiserSpec(Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
-                DenoiserSpec(Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
-                DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
-            ],
-            weights=[0.20, 0.20, 0.15, 0.15, 0.30],
+        model_config = {"frozen": False, "extra": "forbid"}
+
+        @field_validator("r_bounds")
+        @classmethod
+        def validate_r_bounds(cls, v: Tuple[float, float]) -> Tuple[float, float]:
+            if v[0] >= v[1]:
+                raise ValueError("r_bounds[0] must be less than r_bounds[1]")
+            if v[0] < 0.01 or v[1] > 0.99:
+                raise ValueError("r_bounds must be within [0.01, 0.99]")
+            return v
+
+        def __repr__(self):
+            return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
+
+    class UL25Config(BaseModel):
+        """UL2.5 mixture configuration with validation."""
+
+        denoisers: List[DenoiserSpec] = Field(default_factory=list)
+        weights: List[float] = Field(default_factory=list)
+        curriculum_start: Optional[List[float]] = Field(
+            default=None, description="Starting weights for curriculum"
+        )
+        curriculum_end: Optional[List[float]] = Field(
+            default=None, description="Ending weights for curriculum"
+        )
+        enable_length_adaptive: bool = Field(
+            default=True, description="Enable length-adaptive task selection"
+        )
+        enable_boundary_snapping: bool = Field(
+            default=True, description="Enable span boundary snapping"
         )
 
-    @classmethod
-    def minimal(cls) -> "UL25Config":
-        """Minimal config for testing."""
-        return cls(
-            denoisers=[
-                DenoiserSpec(Task.SPAN, mu=3.0, r=0.15),
-                DenoiserSpec(Task.PREFIX_RANDOM),
-            ],
-            weights=[0.5, 0.5],
-        )
+        model_config = {"frozen": False, "extra": "forbid"}
+
+        @model_validator(mode="after")
+        def validate_config(self) -> "UL25Config":
+            # Normalize weights
+            if self.weights:
+                total = sum(self.weights)
+                if total > 0:
+                    self.weights = [w / total for w in self.weights]
+            if self.curriculum_start:
+                total = sum(self.curriculum_start)
+                if total > 0:
+                    self.curriculum_start = [w / total for w in self.curriculum_start]
+            if self.curriculum_end:
+                total = sum(self.curriculum_end)
+                if total > 0:
+                    self.curriculum_end = [w / total for w in self.curriculum_end]
+
+            # Validate lengths match
+            n = len(self.denoisers)
+            if self.weights and len(self.weights) != n:
+                raise ValueError(
+                    f"weights length ({len(self.weights)}) must match denoisers ({n})"
+                )
+            if self.curriculum_start and len(self.curriculum_start) != n:
+                raise ValueError(
+                    f"curriculum_start length must match denoisers ({n})"
+                )
+            if self.curriculum_end and len(self.curriculum_end) != n:
+                raise ValueError(
+                    f"curriculum_end length must match denoisers ({n})"
+                )
+
+            return self
+
+        def get_weights(self, progress: float = 0.0) -> List[float]:
+            """Get interpolated weights based on training progress."""
+            if self.curriculum_start is None or self.curriculum_end is None:
+                return self.weights
+
+            progress = max(0.0, min(1.0, progress))
+            return [
+                (1 - progress) * s + progress * e
+                for s, e in zip(self.curriculum_start, self.curriculum_end)
+            ]
+
+        @classmethod
+        def recommended(cls) -> "UL25Config":
+            """Recommended mixture based on feasibility analysis."""
+            return cls(
+                denoisers=[
+                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                    DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                    DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                    DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                    DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+                ],
+                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+            )
+
+        @classmethod
+        def recommended_with_curriculum(cls) -> "UL25Config":
+            """
+            Recommended config with curriculum learning.
+
+            Early: More span denoising (easier)
+            Late: More prefix LM (matches inference)
+            """
+            return cls(
+                denoisers=[
+                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                    DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                    DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                    DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                    DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+                ],
+                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+                curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
+                curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
+            )
+
+        @classmethod
+        def span_heavy(cls) -> "UL25Config":
+            """Original UL2-style with more span denoising."""
+            return cls(
+                denoisers=[
+                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
+                    DenoiserSpec(task=Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
+                    DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                ],
+                weights=[0.20, 0.20, 0.15, 0.15, 0.30],
+            )
+
+        @classmethod
+        def minimal(cls) -> "UL25Config":
+            """Minimal config for testing."""
+            return cls(
+                denoisers=[
+                    DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15),
+                    DenoiserSpec(task=Task.PREFIX_RANDOM),
+                ],
+                weights=[0.5, 0.5],
+            )
+
+else:
+    # Fallback dataclass-based config when pydantic is not available
+    from dataclasses import dataclass, field
+
+    @dataclass
+    class DenoiserSpec:
+        """Single denoiser specification."""
+
+        task: Task
+        mu: float = 3.0
+        r: float = 0.15
+        max_spans: int = 512
+        prefix: str = ""
+        variable_r: bool = False
+        r_bounds: Tuple[float, float] = (0.05, 0.50)
+
+        def __repr__(self):
+            return f"DenoiserSpec({self.task.name}, r={self.r}, μ={self.mu}, prefix='{self.prefix}')"
+
+    @dataclass
+    class UL25Config:
+        """UL2.5 mixture configuration."""
+
+        denoisers: List[DenoiserSpec] = field(default_factory=list)
+        weights: List[float] = field(default_factory=list)
+        curriculum_start: Optional[List[float]] = None
+        curriculum_end: Optional[List[float]] = None
+        enable_length_adaptive: bool = True
+        enable_boundary_snapping: bool = True
+
+        def __post_init__(self):
+            if self.weights:
+                total = sum(self.weights)
+                self.weights = [w / total for w in self.weights]
+            if self.curriculum_start:
+                total = sum(self.curriculum_start)
+                self.curriculum_start = [w / total for w in self.curriculum_start]
+            if self.curriculum_end:
+                total = sum(self.curriculum_end)
+                self.curriculum_end = [w / total for w in self.curriculum_end]
+
+        def get_weights(self, progress: float = 0.0) -> List[float]:
+            """Get interpolated weights based on training progress."""
+            if self.curriculum_start is None or self.curriculum_end is None:
+                return self.weights
+            progress = max(0.0, min(1.0, progress))
+            return [
+                (1 - progress) * s + progress * e
+                for s, e in zip(self.curriculum_start, self.curriculum_end)
+            ]
+
+        @classmethod
+        def recommended(cls) -> "UL25Config":
+            return cls(
+                denoisers=[
+                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                    DenoiserSpec(Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
+                    DenoiserSpec(Task.PREFIX_SHORT, prefix="[S]"),
+                    DenoiserSpec(Task.PREFIX_LONG, prefix="[S]"),
+                    DenoiserSpec(Task.INFILLING, r=0.30, prefix="[I]"),
+                ],
+                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+            )
+
+        @classmethod
+        def recommended_with_curriculum(cls) -> "UL25Config":
+            return cls(
+                denoisers=[
+                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                    DenoiserSpec(Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
+                    DenoiserSpec(Task.PREFIX_SHORT, prefix="[S]"),
+                    DenoiserSpec(Task.PREFIX_LONG, prefix="[S]"),
+                    DenoiserSpec(Task.INFILLING, r=0.30, prefix="[I]"),
+                ],
+                weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+                curriculum_start=[0.25, 0.25, 0.10, 0.15, 0.10, 0.10, 0.05],
+                curriculum_end=[0.05, 0.05, 0.10, 0.25, 0.20, 0.20, 0.15],
+            )
+
+        @classmethod
+        def span_heavy(cls) -> "UL25Config":
+            return cls(
+                denoisers=[
+                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(Task.SPAN, mu=8.0, r=0.15, prefix="[R]"),
+                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.50, prefix="[X]"),
+                    DenoiserSpec(Task.SPAN, mu=64.0, r=0.50, prefix="[X]"),
+                    DenoiserSpec(Task.PREFIX_RANDOM, prefix="[S]"),
+                ],
+                weights=[0.20, 0.20, 0.15, 0.15, 0.30],
+            )
+
+        @classmethod
+        def minimal(cls) -> "UL25Config":
+            return cls(
+                denoisers=[
+                    DenoiserSpec(Task.SPAN, mu=3.0, r=0.15),
+                    DenoiserSpec(Task.PREFIX_RANDOM),
+                ],
+                weights=[0.5, 0.5],
+            )
 
 
 # =============================================================================
@@ -213,29 +421,96 @@ def span_corruption_mask(
     return mask
 
 
-def middle_heavy_mask(
+def middle_heavy_span_mask(
     seq_len: int,
     noise_density: float,
+    mean_span_length: float,
     device: torch.device,
 ) -> Tensor:
     """
-    Position-biased mask preferring middle positions.
-    Uses Gaussian weighting centered at sequence middle.
+    Position-biased SPAN corruption preferring middle positions.
+
+    Unlike the previous implementation that sampled individual tokens,
+    this version samples span START positions with Gaussian weighting,
+    then extends spans. This creates contiguous masked regions for
+    better retrieval training.
+
+    Args:
+        seq_len: Sequence length
+        noise_density: Target fraction of tokens to mask (r)
+        mean_span_length: Average span length (mu)
+        device: Torch device
+
+    Returns:
+        Boolean tensor [seq_len] where True = corrupted/masked
     """
     num_noise = max(1, min(int(round(seq_len * noise_density)), seq_len - 1))
+    num_spans = max(1, int(round(num_noise / mean_span_length)))
 
-    # Gaussian weights
+    # Gaussian weights for span START positions (prefer middle)
     positions = torch.arange(seq_len, dtype=torch.float32, device=device)
     center = seq_len / 2
     sigma = seq_len / 4
     weights = torch.exp(-0.5 * ((positions - center) / sigma) ** 2)
+
+    # Don't start spans too close to end (leave room for span extension)
+    cutoff = max(1, int(0.9 * seq_len))
+    weights[cutoff:] = 0
+
+    # Ensure weights sum to 1
+    if weights.sum() < 1e-8:
+        weights = torch.ones(seq_len, dtype=torch.float32, device=device)
+        weights[cutoff:] = 0
     weights = weights / weights.sum()
 
-    # Sample without replacement
-    indices = torch.multinomial(weights, num_noise, replacement=False)
+    # Sample span start positions (without replacement)
+    max_possible_spans = min(num_spans, seq_len // 2, cutoff)
+    if max_possible_spans < 1:
+        max_possible_spans = 1
 
+    starts = torch.multinomial(weights, max_possible_spans, replacement=False)
+    starts = torch.sort(starts).values
+
+    # Generate span lengths using Poisson distribution
+    avg_span_len = max(1.0, num_noise / max_possible_spans)
+    span_lens = torch.poisson(
+        torch.full((len(starts),), avg_span_len, device=device)
+    ).long()
+    span_lens = torch.clamp(span_lens, min=1, max=max(1, seq_len // max_possible_spans))
+
+    # Create mask by extending spans from start positions
     mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
-    mask[indices] = True
+
+    starts_list = starts.tolist()
+    lens_list = span_lens.tolist()
+
+    # Track occupied positions to avoid overlapping spans
+    occupied = set()
+    for start, length in zip(starts_list, lens_list):
+        # Extend span, respecting boundaries and avoiding overlaps
+        end = min(start + length, seq_len)
+        # Check if any position in range is already occupied
+        span_positions = set(range(start, end))
+        if not span_positions & occupied:
+            mask[start:end] = True
+            occupied.update(span_positions)
+
+    # If we haven't reached target noise, fill in more from high-weight positions
+    current_noise = mask.sum().item()
+    if current_noise < num_noise * 0.8:  # Allow 20% tolerance
+        remaining = num_noise - current_noise
+        # Get unmasked positions weighted by original Gaussian
+        unmasked_weights = weights.clone()
+        unmasked_weights[mask] = 0
+        if unmasked_weights.sum() > 1e-8:
+            unmasked_weights = unmasked_weights / unmasked_weights.sum()
+            extra_count = min(int(remaining), int((~mask).sum().item()))
+            if extra_count > 0:
+                extra_indices = torch.multinomial(
+                    unmasked_weights, extra_count, replacement=False
+                )
+                mask[extra_indices] = True
+
     return mask
 
 
@@ -297,6 +572,82 @@ def infilling_mask(
     mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
     mask[hole_start:hole_end] = True
     return mask, hole_start, hole_end
+
+
+# =============================================================================
+# SPAN BOUNDARY SNAPPING
+# =============================================================================
+
+
+def snap_mask_to_word_boundaries(
+    mask: Tensor,
+    input_ids: Tensor,
+    tokenizer: Any,
+) -> Tensor:
+    """
+    Snap mask boundaries to word/token boundaries.
+
+    This adjusts span starts to align with word-initial tokens (those starting
+    with space, Ġ for GPT-style, or ▁ for SentencePiece). This makes the
+    corruption more semantically meaningful.
+
+    Args:
+        mask: Boolean mask tensor [seq_len]
+        input_ids: Token IDs tensor [seq_len]
+        tokenizer: Tokenizer with convert_ids_to_tokens method
+
+    Returns:
+        Adjusted mask tensor [seq_len]
+    """
+    device = mask.device
+    seq_len = mask.shape[0]
+
+    # Detect word-start tokens
+    is_word_start = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    is_word_start[0] = True  # First token is always a boundary
+
+    for i in range(1, seq_len):
+        try:
+            token = tokenizer.convert_ids_to_tokens(input_ids[i].item())
+            if token is None:
+                continue
+            # SentencePiece uses ▁, BPE uses Ġ or leading space
+            if (
+                token.startswith("▁")
+                or token.startswith("Ġ")
+                or token.startswith(" ")
+                or token.startswith("<")  # Special tokens
+            ):
+                is_word_start[i] = True
+        except Exception:
+            continue
+
+    # Find span starts in current mask (False -> True transitions)
+    shifted = torch.cat([torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]])
+    span_starts = mask & ~shifted
+
+    new_mask = mask.clone()
+    start_indices = span_starts.nonzero().squeeze(-1)
+
+    if start_indices.dim() == 0:
+        start_indices = start_indices.unsqueeze(0)
+
+    for idx in start_indices.tolist():
+        if is_word_start[idx]:
+            continue  # Already aligned
+
+        # Find next word boundary >= idx
+        candidates = is_word_start[idx:].nonzero()
+        if len(candidates) > 0:
+            offset = candidates[0].item()
+            new_start = idx + offset
+
+            # Don't snap too far (max 3 tokens)
+            if new_start > idx and new_start - idx <= 3:
+                # Clear positions between old start and new start
+                new_mask[idx:new_start] = False
+
+    return new_mask
 
 
 # =============================================================================
@@ -439,6 +790,9 @@ class UL25DataCollator:
         # Sampling weights as tensor
         self._weights = torch.tensor(self.config.weights, dtype=torch.float32)
 
+        # Training progress for curriculum
+        self._progress = 0.0
+
     def _get_sentinel_start(self) -> int:
         """Get highest extra_id token ID.
 
@@ -468,6 +822,65 @@ class UL25DataCollator:
             "No extra_id tokens found. Using 32099 as default sentinel start."
         )
         return 32099
+
+    @property
+    def progress(self) -> float:
+        """Current training progress (0-1) for curriculum."""
+        return self._progress
+
+    @progress.setter
+    def progress(self, value: float):
+        """Set training progress for curriculum learning."""
+        self._progress = max(0.0, min(1.0, value))
+
+    def _get_curriculum_weights(self) -> Tensor:
+        """Get denoiser sampling weights (supports curriculum learning)."""
+        if self._progress == 0.0:
+            return self._weights
+        return torch.tensor(
+            self.config.get_weights(self._progress), dtype=torch.float32
+        )
+
+    def _get_length_adaptive_weights(self, seq_len: int) -> Tensor:
+        """
+        Adjust task weights based on sequence length.
+
+        For longer sequences, boost tasks that exercise long-context abilities:
+        - Prefix LM variants
+        - Middle-heavy span corruption
+        - Infilling
+        """
+        if not getattr(self.config, "enable_length_adaptive", True):
+            return self._get_curriculum_weights()
+
+        base_weights = self._get_curriculum_weights()
+
+        if seq_len < 1024:
+            return base_weights
+
+        # Identify task indices by type
+        prefix_indices = []
+        middle_indices = []
+        infill_indices = []
+
+        for i, d in enumerate(self.config.denoisers):
+            if d.task in (Task.PREFIX_RANDOM, Task.PREFIX_SHORT, Task.PREFIX_LONG):
+                prefix_indices.append(i)
+            elif d.task == Task.SPAN_MIDDLE:
+                middle_indices.append(i)
+            elif d.task == Task.INFILLING:
+                infill_indices.append(i)
+
+        # Boost long-context-relevant tasks (scale with length)
+        adjusted = base_weights.clone()
+        boost = min(0.3, (seq_len - 1024) / 8192)
+
+        for idx in prefix_indices + middle_indices + infill_indices:
+            adjusted[idx] *= 1 + boost
+
+        # Renormalize
+        adjusted = adjusted / adjusted.sum()
+        return adjusted
 
     def _get_prefix_ids(self, prefix: str, device: torch.device) -> Optional[Tensor]:
         """Get prefix token IDs on correct device (caches per-device)."""
@@ -504,7 +917,8 @@ class UL25DataCollator:
         if spec.task == Task.SPAN:
             return span_corruption_mask(seq_len, r, spec.mu, spec.max_spans, device)
         elif spec.task == Task.SPAN_MIDDLE:
-            return middle_heavy_mask(seq_len, r, device)
+            # Use the new middle-heavy SPAN mask (creates actual spans)
+            return middle_heavy_span_mask(seq_len, r, spec.mu, device)
         elif spec.task == Task.PREFIX_RANDOM:
             return prefix_lm_mask(seq_len, "random", device)[0]
         elif spec.task == Task.PREFIX_SHORT:
@@ -525,15 +939,24 @@ class UL25DataCollator:
         device = input_ids.device
         seq_len = input_ids.shape[0]
 
-        # Sample denoiser
+        # Sample denoiser (with length-adaptive weights if enabled)
         if denoiser_idx is None:
-            denoiser_idx = torch.multinomial(self._weights, 1).item()
+            weights = self._get_length_adaptive_weights(seq_len)
+            denoiser_idx = torch.multinomial(weights, 1).item()
 
         spec = self.config.denoisers[denoiser_idx]
         prefix_ids = self._get_prefix_ids(spec.prefix, device)
 
         # Generate mask
         mask = self._generate_mask(seq_len, spec, device)
+
+        # Apply boundary snapping if enabled and tokenizer supports it
+        if getattr(self.config, "enable_boundary_snapping", True):
+            if hasattr(self.tokenizer, "convert_ids_to_tokens"):
+                try:
+                    mask = snap_mask_to_word_boundaries(mask, input_ids, self.tokenizer)
+                except Exception:
+                    pass  # Fall back to unsnapped mask
 
         # Create sentinel IDs for encoder (masked spans) and decoder (unmasked spans)
         enc_sentinels = create_sentinel_ids(mask, self.sentinel_start)
@@ -578,10 +1001,22 @@ class UL25DataCollator:
         else:
             device = torch.device("cpu")
 
-        # Batch sample all denoiser indices at once (single multinomial call)
         batch_size = len(examples)
+
+        # Get sequence lengths to determine weights
+        seq_lens = []
+        for ex in examples:
+            ids = ex["input_ids"]
+            if isinstance(ids, Tensor):
+                seq_lens.append(ids.shape[-1] if ids.dim() > 0 else 1)
+            else:
+                seq_lens.append(len(ids))
+
+        # Batch sample denoiser indices (use max seq_len for weight calculation)
+        max_seq_len = max(seq_lens)
+        weights = self._get_length_adaptive_weights(max_seq_len)
         denoiser_indices = (
-            torch.multinomial(self._weights.expand(batch_size, -1), 1)
+            torch.multinomial(weights.expand(batch_size, -1), 1)
             .squeeze(-1)
             .tolist()
         )
@@ -616,7 +1051,7 @@ class UL25DataCollator:
         batch_size = len(processed)
 
         # Allocate output tensors
-        input_ids = torch.full(
+        input_ids_batch = torch.full(
             (batch_size, max_enc), self.pad_id, dtype=torch.long, device=device
         )
         attention_mask = torch.zeros(
@@ -634,12 +1069,12 @@ class UL25DataCollator:
             enc_len = min(enc.shape[0], max_enc)
             dec_len = min(dec.shape[0], max_dec)
 
-            input_ids[i, :enc_len] = enc[:enc_len]
+            input_ids_batch[i, :enc_len] = enc[:enc_len]
             attention_mask[i, :enc_len] = 1
             labels[i, :dec_len] = dec[:dec_len]
 
         return {
-            "input_ids": input_ids,
+            "input_ids": input_ids_batch,
             "attention_mask": attention_mask,
             "labels": labels,
         }
@@ -658,6 +1093,7 @@ def _run_tests():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    print(f"Pydantic available: {PYDANTIC_AVAILABLE}")
 
     # Test masking functions
     print("\n[TEST] Masking functions")
@@ -671,11 +1107,22 @@ def _run_tests():
     )
     assert 0.10 < density < 0.25, "Density out of range"
 
-    # Middle-heavy
-    mask = middle_heavy_mask(seq_len, 0.15, device)
+    # Middle-heavy SPAN mask (new implementation)
+    mask = middle_heavy_span_mask(seq_len, 0.20, 12.0, device)
+    density = mask.float().mean().item()
     middle = mask[25:75].float().mean().item()
     edges = (mask[:25].float().mean().item() + mask[75:].float().mean().item()) / 2
-    print(f"  middle_heavy_mask: middle={middle:.3f}, edges={edges:.3f}")
+
+    # Count contiguous spans
+    shifted = torch.cat([torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]])
+    num_spans = (mask & ~shifted).sum().item()
+
+    print(f"  middle_heavy_span_mask: {mask.sum().item()}/{seq_len} masked")
+    print(f"    density={density:.3f}, middle={middle:.3f}, edges={edges:.3f}")
+    print(f"    num_spans={num_spans} (should be coherent spans, not scattered)")
+
+    # Verify it creates actual spans (not scattered tokens)
+    assert num_spans < mask.sum().item(), "Should create spans, not individual tokens"
 
     # Prefix LM
     for mode in ["random", "short", "long"]:
@@ -698,6 +1145,20 @@ def _run_tests():
     assert sids[3] == -1, "Continuation should be -1"
     assert sids[5] == 32098, "Second span decrements"
 
+    # Test configuration
+    print("\n[TEST] Configuration")
+    config = UL25Config.recommended()
+    print(f"  recommended: {len(config.denoisers)} denoisers")
+
+    config_curriculum = UL25Config.recommended_with_curriculum()
+    print(f"  with curriculum: start={config_curriculum.curriculum_start is not None}")
+
+    # Test curriculum weights
+    w0 = config_curriculum.get_weights(0.0)
+    w1 = config_curriculum.get_weights(1.0)
+    print(f"  weights at progress=0: {[f'{w:.2f}' for w in w0[:3]]}...")
+    print(f"  weights at progress=1: {[f'{w:.2f}' for w in w1[:3]]}...")
+
     # Test full collator with mock tokenizer
     print("\n[TEST] Full collator")
 
@@ -706,9 +1167,15 @@ def _run_tests():
         pad_token_id = 0
         all_special_tokens = [f"<extra_id_{i}>" for i in range(100)]
         all_special_ids = list(range(32000, 32100))
+        unk_token_id = 0
 
         def encode(self, text, add_special_tokens=False):
             return [ord(c) for c in text[:10]]
+
+        def convert_ids_to_tokens(self, token_id):
+            if token_id < 100:
+                return f"▁tok{token_id}"
+            return f"tok{token_id}"
 
     tokenizer = MockTokenizer()
     config = UL25Config.recommended()
@@ -740,6 +1207,22 @@ def _run_tests():
     assert batch["input_ids"].dtype == torch.long
     assert batch["attention_mask"].dtype == torch.long
     assert batch["labels"].dtype == torch.long
+
+    # Test curriculum
+    print("\n[TEST] Curriculum learning")
+    collator.progress = 0.0
+    print(f"  progress=0.0: set successfully")
+    collator.progress = 0.5
+    print(f"  progress=0.5: set successfully")
+    collator.progress = 1.0
+    print(f"  progress=1.0: set successfully")
+
+    # Test length-adaptive weights
+    print("\n[TEST] Length-adaptive weights")
+    short_weights = collator._get_length_adaptive_weights(512)
+    long_weights = collator._get_length_adaptive_weights(4096)
+    print(f"  short seq (512): {[f'{w:.3f}' for w in short_weights.tolist()[:3]]}...")
+    print(f"  long seq (4096): {[f'{w:.3f}' for w in long_weights.tolist()[:3]]}...")
 
     # Benchmark
     print("\n[BENCHMARK] Throughput")
@@ -776,7 +1259,8 @@ def _run_tests():
     print(f"  {samples_per_sec:.0f} samples/sec")
     print(f"  {tokens_per_sec:,.0f} tokens/sec")
 
-    print("\n✓ All tests passed")
+    print("\n" + "=" * 60)
+    print("All tests passed!")
     print("=" * 60)
 
 
