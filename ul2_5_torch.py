@@ -435,6 +435,9 @@ def middle_heavy_span_mask(
     then extends spans. This creates contiguous masked regions for
     better retrieval training.
 
+    The function ensures the total masked tokens stays close to the
+    target noise_density * seq_len (within a small tolerance).
+
     Args:
         seq_len: Sequence length
         noise_density: Target fraction of tokens to mask (r)
@@ -484,20 +487,43 @@ def middle_heavy_span_mask(
     starts_list = starts.tolist()
     lens_list = span_lens.tolist()
 
-    # Track occupied positions to avoid overlapping spans
+    # Track occupied positions and remaining budget
     occupied = set()
+    tokens_masked = 0
+
     for start, length in zip(starts_list, lens_list):
+        # Check remaining budget - stop if we've reached target
+        remaining_budget = num_noise - tokens_masked
+        if remaining_budget <= 0:
+            break
+
+        # Cap span length to remaining budget
+        length = min(length, remaining_budget)
+
         # Extend span, respecting boundaries and avoiding overlaps
         end = min(start + length, seq_len)
         # Check if any position in range is already occupied
         span_positions = set(range(start, end))
         if not span_positions & occupied:
-            mask[start:end] = True
-            occupied.update(span_positions)
+            actual_len = end - start
+            # Only add if it doesn't exceed budget
+            if tokens_masked + actual_len <= num_noise:
+                mask[start:end] = True
+                occupied.update(span_positions)
+                tokens_masked += actual_len
+            elif remaining_budget > 0:
+                # Truncate span to fit budget
+                truncated_end = start + remaining_budget
+                if truncated_end > start:
+                    truncated_positions = set(range(start, truncated_end))
+                    if not truncated_positions & occupied:
+                        mask[start:truncated_end] = True
+                        occupied.update(truncated_positions)
+                        tokens_masked += truncated_end - start
 
     # If we haven't reached target noise, fill in more from high-weight positions
     current_noise = mask.sum().item()
-    if current_noise < num_noise * 0.8:  # Allow 20% tolerance
+    if current_noise < num_noise:
         remaining = num_noise - current_noise
         # Get unmasked positions weighted by original Gaussian
         unmasked_weights = weights.clone()
