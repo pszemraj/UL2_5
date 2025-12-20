@@ -6,8 +6,11 @@ GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementin
 
 - **Multiple denoising objectives**: Span corruption, prefix LM, infilling
 - **GPU-optimized**: Batch sampling, device-specific caching, minimal CPU-GPU sync
+- **Validated configs**: Pydantic-based checks for weights and ranges
 - **HuggingFace compatible**: Works with `Trainer` and `DataLoader`
 - **Curriculum learning**: Gradually shift denoiser mixture during training
+- **Length-adaptive sampling**: Boost long-context tasks for long sequences
+- **Span boundary snapping**: Align span starts to word boundaries (CPU only)
 - **Two implementations**: HF-integrated (`ul2_5_hf.py`) or pure PyTorch (`ul2_5_torch.py`)
 
 ---
@@ -33,7 +36,7 @@ GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementin
 ## Installation
 
 ```bash
-pip install torch>=2.0.0 transformers>=4.30.0 sentencepiece
+pip install torch>=2.0.0 transformers>=4.30.0 sentencepiece pydantic>=2.0.0
 ```
 
 Or clone and install dependencies:
@@ -199,7 +202,10 @@ Target: <extra_id_0> brown fox <extra_id_1> over the lazy
 
 ### Middle-Heavy Span (`Task.SPAN_MIDDLE`)
 
-Position-biased masking preferring middle tokens (Gaussian weighting).
+Position-biased span corruption that samples span starts with Gaussian weighting
+to prefer the middle of the sequence. Produces contiguous spans.
+When `enable_boundary_snapping` is enabled, span starts are aligned to word
+boundaries for CPU inputs.
 
 ### Prefix LM (`Task.PREFIX_RANDOM/SHORT/LONG`)
 
@@ -239,9 +245,11 @@ UL25DataCollator(
 ```python
 UL25Config(
     denoisers: List[DenoiserSpec],  # List of denoiser specifications
-    weights: List[float],           # Sampling probabilities (must sum to 1)
+    weights: List[float],           # Sampling probabilities (required, sum to 1)
     curriculum_start: List[float],  # Weights at progress=0 (optional)
     curriculum_end: List[float],    # Weights at progress=1 (optional)
+    enable_length_adaptive: bool = True,   # Length-adaptive task selection
+    enable_boundary_snapping: bool = True, # Snap span starts to word boundaries (CPU only)
 )
 ```
 
@@ -251,11 +259,11 @@ UL25Config(
 DenoiserSpec(
     task: Task,           # Task type (SPAN, PREFIX_RANDOM, etc.)
     mu: float = 3.0,      # Mean span length (for SPAN tasks)
-    r: float = 0.15,      # Noise density / corruption rate
+    r: float = 0.15,      # Noise density / corruption rate (0.01-0.99)
     max_spans: int = 512, # Maximum number of spans
     prefix: str = "",     # Task prefix token ("[S]", "[R]", etc.)
     variable_r: bool = False,  # Sample r uniformly from r_bounds
-    r_bounds: Tuple[float, float] = (0.0, 1.0),  # Range for variable_r
+    r_bounds: Tuple[float, float] = (0.05, 0.50),  # Range for variable_r (0.01-0.99)
 )
 ```
 
@@ -263,7 +271,7 @@ DenoiserSpec(
 
 1. **Use `pad_to_multiple_of=8`** for tensor core alignment
 2. **Pin memory** in DataLoader: `pin_memory=True`
-3. **GPU tensors**: Pass input_ids as CUDA tensors for GPU-side processing
+3. **GPU tensors**: Pass input_ids as CUDA tensors for GPU-side processing (boundary snapping runs on CPU only)
 4. **Batch size**: Larger batches amortize collation overhead
 
 ## Benchmarks
