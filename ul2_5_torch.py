@@ -1036,14 +1036,12 @@ class UL25DataCollator:
             else:
                 seq_lens.append(len(ids))
 
-        # Batch sample denoiser indices (use max seq_len for weight calculation)
-        max_seq_len = max(seq_lens)
-        weights = self._get_length_adaptive_weights(max_seq_len)
-        denoiser_indices = (
-            torch.multinomial(weights.expand(batch_size, -1), 1)
-            .squeeze(-1)
-            .tolist()
+        # Sample denoiser indices per example (length-adaptive weights per sequence)
+        weights = torch.stack(
+            [self._get_length_adaptive_weights(seq_len) for seq_len in seq_lens],
+            dim=0,
         )
+        denoiser_indices = torch.multinomial(weights, 1).squeeze(-1).tolist()
 
         # Process each example
         processed = []

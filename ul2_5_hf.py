@@ -1026,12 +1026,12 @@ class UL25DataCollator(DataCollatorMixin if HF_AVAILABLE else object):
             else:
                 seq_lens.append(len(ids))
 
-        # Batch sample all denoiser indices at once (use max seq_len for weights)
-        max_seq_len = max(seq_lens)
-        weights = self._get_length_adaptive_weights(max_seq_len)
-        denoiser_indices = (
-            torch.multinomial(weights.expand(batch_size, -1), 1).squeeze(-1).tolist()
+        # Sample denoiser indices per example (length-adaptive weights per sequence)
+        weights = torch.stack(
+            [self._get_length_adaptive_weights(seq_len) for seq_len in seq_lens],
+            dim=0,
         )
+        denoiser_indices = torch.multinomial(weights, 1).squeeze(-1).tolist()
 
         # Process examples
         processed = []
