@@ -16,7 +16,7 @@ from ul2_5_hf import (
     UL25DataCollator,
     create_sentinel_ids,
     infilling_mask,
-    middle_heavy_mask,
+    middle_heavy_span_mask,
     prefix_lm_mask,
     span_corruption_mask,
 )
@@ -85,9 +85,9 @@ def test_masking_correctness(device: torch.device):
     print("  ✓ Passed")
 
     # Test 2: Middle-heavy position bias
-    print("\n[TEST] middle_heavy_mask")
+    print("\n[TEST] middle_heavy_span_mask")
     masks = torch.stack(
-        [middle_heavy_mask(seq_len, 0.15, device) for _ in range(n_samples)]
+        [middle_heavy_span_mask(seq_len, 0.15, 12.0, device) for _ in range(n_samples)]
     )
     avg_mask = masks.float().mean(dim=0)
 
@@ -196,7 +196,7 @@ def benchmark_masking_functions(device: torch.device):
 
     funcs = {
         "span_corruption": lambda sl: span_corruption_mask(sl, 0.15, 3.0, 512, device),
-        "middle_heavy": lambda sl: middle_heavy_mask(sl, 0.15, device),
+        "middle_heavy_span": lambda sl: middle_heavy_span_mask(sl, 0.15, 12.0, device),
         "prefix_lm": lambda sl: prefix_lm_mask(sl, "random", device),
         "infilling": lambda sl: infilling_mask(sl, 0.3, device),
     }
@@ -360,7 +360,13 @@ def test_real_tokenizer():
     print("REAL TOKENIZER TEST")
     print("=" * 60)
 
-    tokenizer = AutoTokenizer.from_pretrained("google/t5-v1_1-small")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            "google/t5-v1_1-small", use_fast=False
+        )
+    except ImportError as exc:
+        print(f"  Skipping: {exc}")
+        return
     tokenizer.add_special_tokens(
         {"additional_special_tokens": ["[R]", "[S]", "[X]", "[I]"]}
     )
@@ -424,7 +430,7 @@ def create_visualizations(device: torch.device):
             "Uniform (Standard)",
             lambda: span_corruption_mask(seq_len, 0.15, 3.0, 512, device),
         ),
-        ("Middle-Heavy", lambda: middle_heavy_mask(seq_len, 0.15, device)),
+        ("Middle-Heavy", lambda: middle_heavy_span_mask(seq_len, 0.15, 12.0, device)),
         ("Prefix LM (random)", lambda: prefix_lm_mask(seq_len, "random", device)[0]),
         ("Prefix LM (short)", lambda: prefix_lm_mask(seq_len, "short", device)[0]),
         ("Prefix LM (long)", lambda: prefix_lm_mask(seq_len, "long", device)[0]),
@@ -460,7 +466,7 @@ def create_visualizations(device: torch.device):
     examples = [
         ("Span (μ=3, r=0.15)", span_corruption_mask(80, 0.15, 3.0, 512, device)),
         ("Span (μ=8, r=0.25)", span_corruption_mask(80, 0.25, 8.0, 512, device)),
-        ("Middle-Heavy", middle_heavy_mask(80, 0.20, device)),
+        ("Middle-Heavy", middle_heavy_span_mask(80, 0.20, 12.0, device)),
         ("Prefix LM (random)", prefix_lm_mask(80, "random", device)[0]),
         ("Prefix LM (short)", prefix_lm_mask(80, "short", device)[0]),
         ("Infilling (30%)", infilling_mask(80, 0.3, device)[0]),

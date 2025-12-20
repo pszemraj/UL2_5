@@ -140,19 +140,35 @@ class UL25Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_config(self) -> "UL25Config":
-        # Normalize weights
+        if self.denoisers and not self.weights:
+            raise ValueError("weights must be provided when denoisers are set")
+
+        # Normalize and validate weights
         if self.weights:
+            if any(w < 0 for w in self.weights):
+                raise ValueError("weights must be non-negative")
             total = sum(self.weights)
-            if total > 0:
-                self.weights = [w / total for w in self.weights]
+            if total <= 0:
+                raise ValueError("weights must sum to > 0")
+            self.weights = [w / total for w in self.weights]
+
+        if (self.curriculum_start is None) ^ (self.curriculum_end is None):
+            raise ValueError("curriculum_start and curriculum_end must both be set")
+
         if self.curriculum_start:
+            if any(w < 0 for w in self.curriculum_start):
+                raise ValueError("curriculum_start must be non-negative")
             total = sum(self.curriculum_start)
-            if total > 0:
-                self.curriculum_start = [w / total for w in self.curriculum_start]
+            if total <= 0:
+                raise ValueError("curriculum_start must sum to > 0")
+            self.curriculum_start = [w / total for w in self.curriculum_start]
         if self.curriculum_end:
+            if any(w < 0 for w in self.curriculum_end):
+                raise ValueError("curriculum_end must be non-negative")
             total = sum(self.curriculum_end)
-            if total > 0:
-                self.curriculum_end = [w / total for w in self.curriculum_end]
+            if total <= 0:
+                raise ValueError("curriculum_end must sum to > 0")
+            self.curriculum_end = [w / total for w in self.curriculum_end]
 
         # Validate lengths match
         n = len(self.denoisers)
@@ -505,6 +521,8 @@ def snap_mask_to_word_boundaries(
     with space, Ġ for GPT-style, or ▁ for SentencePiece). This makes the
     corruption more semantically meaningful.
 
+    Note: This only runs on CPU tensors to avoid GPU sync overhead.
+
     Args:
         mask: Boolean mask tensor [seq_len]
         input_ids: Token IDs tensor [seq_len]
@@ -513,55 +531,129 @@ def snap_mask_to_word_boundaries(
     Returns:
         Adjusted mask tensor [seq_len]
     """
-    device = mask.device
-    seq_len = mask.shape[0]
+    if mask.device.type != "cpu":
+        return mask
+
+    seq_len = int(mask.shape[0])
+    if seq_len == 0:
+        return mask
+
+    if isinstance(input_ids, Tensor):
+        if input_ids.device.type != "cpu":
+            return mask
+        ids = input_ids.tolist()
+    else:
+        ids = list(input_ids)
+
+    if len(ids) != seq_len:
+        return mask
+
+    tokens = None
+    try:
+        tokens = tokenizer.convert_ids_to_tokens(ids)
+    except Exception:
+        pass
+
+    if not tokens or len(tokens) != seq_len:
+        try:
+            tokens = [tokenizer.convert_ids_to_tokens(token_id) for token_id in ids]
+        except Exception:
+            return mask
+
+    if not tokens or len(tokens) != seq_len:
+        return mask
 
     # Detect word-start tokens
-    is_word_start = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    is_word_start = [False] * seq_len
     is_word_start[0] = True  # First token is always a boundary
 
     for i in range(1, seq_len):
-        try:
-            token = tokenizer.convert_ids_to_tokens(input_ids[i].item())
-            if token is None:
-                continue
-            # SentencePiece uses ▁, BPE uses Ġ or leading space
-            if (
-                token.startswith("▁")
-                or token.startswith("Ġ")
-                or token.startswith(" ")
-                or token.startswith("<")  # Special tokens
-            ):
-                is_word_start[i] = True
-        except Exception:
+        token = tokens[i]
+        if token is None:
+            continue
+        if (
+            token.startswith("▁")
+            or token.startswith("Ġ")
+            or token.startswith(" ")
+            or token.startswith("<")  # Special tokens
+        ):
+            is_word_start[i] = True
+
+    def _find_spans(flags: List[bool]) -> List[Tuple[int, int]]:
+        spans = []
+        in_span = False
+        start = 0
+        for i, val in enumerate(flags):
+            if val and not in_span:
+                start = i
+                in_span = True
+            elif not val and in_span:
+                spans.append((start, i))
+                in_span = False
+        if in_span:
+            spans.append((start, len(flags)))
+        return spans
+
+    mask_list = mask.tolist()
+    target_count = sum(mask_list)
+    if target_count == 0:
+        return mask
+
+    new_mask = mask_list[:]
+    spans = _find_spans(new_mask)
+    max_shift = 3
+
+    for start, _ in spans:
+        if start >= seq_len or is_word_start[start]:
             continue
 
-    # Find span starts in current mask (False -> True transitions)
-    shifted = torch.cat([torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]])
-    span_starts = mask & ~shifted
+        new_start = None
+        for offset in range(1, max_shift + 1):
+            idx = start + offset
+            if idx >= seq_len:
+                break
+            if is_word_start[idx]:
+                new_start = idx
+                break
 
-    new_mask = mask.clone()
-    start_indices = span_starts.nonzero().squeeze(-1)
+        if new_start is None:
+            continue
 
-    if start_indices.dim() == 0:
-        start_indices = start_indices.unsqueeze(0)
+        for i in range(start, new_start):
+            new_mask[i] = False
 
-    for idx in start_indices.tolist():
-        if is_word_start[idx]:
-            continue  # Already aligned
+    missing = target_count - sum(new_mask)
+    if missing > 0:
+        spans = _find_spans(new_mask)
+        for i, (_, end) in enumerate(spans):
+            if missing <= 0:
+                break
+            next_start = spans[i + 1][0] if i + 1 < len(spans) else seq_len
+            available = max(0, next_start - end)
+            if available == 0:
+                continue
+            extend_by = min(available, missing)
+            for j in range(end, end + extend_by):
+                new_mask[j] = True
+            missing -= extend_by
 
-        # Find next word boundary >= idx
-        candidates = is_word_start[idx:].nonzero()
-        if len(candidates) > 0:
-            offset = candidates[0].item()
-            new_start = idx + offset
+    if missing > 0:
+        for i, is_start in enumerate(is_word_start):
+            if missing <= 0:
+                break
+            if is_start and not new_mask[i]:
+                new_mask[i] = True
+                missing -= 1
 
-            # Don't snap too far (max 3 tokens)
-            if new_start > idx and new_start - idx <= 3:
-                # Clear positions between old start and new start
-                new_mask[idx:new_start] = False
+    if missing > 0:
+        for i in range(seq_len):
+            if missing <= 0:
+                break
+            if not new_mask[i]:
+                new_mask[i] = True
+                missing -= 1
 
-    return new_mask
+    return torch.tensor(new_mask, dtype=torch.bool, device=mask.device)
 
 
 def create_sentinel_ids(mask: Tensor, sentinel_start: int) -> Tensor:
@@ -830,7 +922,10 @@ class UL25DataCollator(DataCollatorMixin):
         mask = self._generate_mask(seq_len, spec, device)
 
         # Apply boundary snapping if enabled and tokenizer supports it
-        if getattr(self.config, "enable_boundary_snapping", True):
+        if getattr(self.config, "enable_boundary_snapping", True) and spec.task in (
+            Task.SPAN,
+            Task.SPAN_MIDDLE,
+        ):
             if hasattr(self.tokenizer, "convert_ids_to_tokens"):
                 try:
                     mask = snap_mask_to_word_boundaries(mask, input_ids, self.tokenizer)
@@ -1040,6 +1135,21 @@ def _test():
             return f"tok{token_id}"
 
     tokenizer = MockTokenizer()
+
+    # Test boundary snapping (CPU only)
+    print("\n[TEST] Boundary snapping")
+    cpu_device = torch.device("cpu")
+    snap_ids = torch.tensor([200, 201, 10, 202, 203], device=cpu_device)
+    snap_mask = torch.tensor(
+        [False, True, True, False, False], dtype=torch.bool, device=cpu_device
+    )
+    snapped = snap_mask_to_word_boundaries(snap_mask, snap_ids, tokenizer)
+    assert snapped.sum().item() == snap_mask.sum().item()
+    shifted = torch.cat([torch.zeros(1, dtype=torch.bool), snapped[:-1]])
+    start_indices = (snapped & ~shifted).nonzero().squeeze(-1).tolist()
+    for idx in start_indices:
+        token = tokenizer.convert_ids_to_tokens(snap_ids[idx].item())
+        assert token.startswith("▁") or idx == 0
 
     # Test all configs
     print("\n[TEST] Configuration presets")
