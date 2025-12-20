@@ -29,6 +29,7 @@ Usage:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Dict, List, Optional, Tuple
@@ -177,24 +178,35 @@ def span_corruption_mask(
     noise_lengths = _random_segmentation(num_noise, num_spans, device)
     nonnoise_lengths = _random_segmentation(num_nonnoise, num_spans, device)
 
-    # Interleave: [nonnoise, noise, nonnoise, noise, ...]
-    # Create alternating pattern
+    # Interleave segments with random start to avoid edge bias
     n = min(len(noise_lengths), len(nonnoise_lengths))
-    interleaved = torch.zeros(n * 2, dtype=torch.long, device=device)
-    interleaved[0::2] = nonnoise_lengths[:n]
-    interleaved[1::2] = noise_lengths[:n]
-
-    # Build mask from lengths
     mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
     pos = 0
-    is_noise = False
 
-    for length in interleaved:
-        if is_noise:
-            end = min(pos + length.item(), seq_len)
+    # Convert to lists once to avoid repeated .item() calls
+    noise_list = noise_lengths.tolist()
+    nonnoise_list = nonnoise_lengths.tolist()
+
+    # Randomize starting pattern to eliminate edge effect at seq end
+    start_with_noise = torch.rand(1, device=device).item() < 0.5
+
+    for i in range(n):
+        if start_with_noise:
+            # Noise segment first
+            noise_len = noise_list[i]
+            end = min(pos + noise_len, seq_len)
             mask[pos:end] = True
-        pos += length.item()
-        is_noise = not is_noise
+            pos = end
+            # Then nonnoise segment
+            pos += nonnoise_list[i]
+        else:
+            # Nonnoise segment first (original order)
+            pos += nonnoise_list[i]
+            # Then noise segment
+            noise_len = noise_list[i]
+            end = min(pos + noise_len, seq_len)
+            mask[pos:end] = True
+            pos = end
         if pos >= seq_len:
             break
 
@@ -428,20 +440,50 @@ class UL25DataCollator:
         self._weights = torch.tensor(self.config.weights, dtype=torch.float32)
 
     def _get_sentinel_start(self) -> int:
-        """Get highest extra_id token ID."""
+        """Get highest extra_id token ID.
+
+        Detection order:
+        1. Direct conversion of <extra_id_0> (most reliable for T5 tokenizers)
+        2. Search special tokens for extra_id pattern (fallback)
+        3. Hardcoded 32099 default
+        """
+        # Method 1: Direct token conversion (most reliable)
+        try:
+            token_id = self.tokenizer.convert_tokens_to_ids("<extra_id_0>")
+            if token_id != self.tokenizer.unk_token_id:
+                return token_id
+        except Exception:
+            pass
+
+        # Method 2: Search special tokens for extra_id pattern
         extra_ids = []
         for i, tok in enumerate(self.tokenizer.all_special_tokens):
-            if "extra" in tok.lower():
+            if "extra_id" in tok.lower():
                 extra_ids.append(self.tokenizer.all_special_ids[i])
-        return max(extra_ids) if extra_ids else 32099
+        if extra_ids:
+            return max(extra_ids)
+
+        # Method 3: Hardcoded default with warning
+        warnings.warn(
+            "No extra_id tokens found. Using 32099 as default sentinel start."
+        )
+        return 32099
 
     def _get_prefix_ids(self, prefix: str, device: torch.device) -> Optional[Tensor]:
-        """Get prefix token IDs on correct device."""
+        """Get prefix token IDs on correct device (caches per-device)."""
         if not prefix:
             return None
-        return self._prefix_cache.get(prefix, torch.tensor([], dtype=torch.long)).to(
-            device
-        )
+        # Check for device-specific cached tensor
+        cache_key = (prefix, str(device))
+        if cache_key in self._prefix_cache:
+            return self._prefix_cache[cache_key]
+        # Get base tensor and cache device-specific version
+        base_tensor = self._prefix_cache.get(prefix)
+        if base_tensor is not None:
+            device_tensor = base_tensor.to(device)
+            self._prefix_cache[cache_key] = device_tensor
+            return device_tensor
+        return None
 
     def _sample_r(self, spec: DenoiserSpec) -> float:
         """Sample corruption rate."""
@@ -536,9 +578,17 @@ class UL25DataCollator:
         else:
             device = torch.device("cpu")
 
+        # Batch sample all denoiser indices at once (single multinomial call)
+        batch_size = len(examples)
+        denoiser_indices = (
+            torch.multinomial(self._weights.expand(batch_size, -1), 1)
+            .squeeze(-1)
+            .tolist()
+        )
+
         # Process each example
         processed = []
-        for ex in examples:
+        for i, ex in enumerate(examples):
             input_ids = ex["input_ids"]
 
             # Convert to tensor if needed
@@ -550,7 +600,7 @@ class UL25DataCollator:
                 input_ids = input_ids.squeeze(0)
 
             input_ids = input_ids.to(device)
-            processed.append(self._process_single(input_ids))
+            processed.append(self._process_single(input_ids, denoiser_indices[i]))
 
         # Compute padded lengths
         max_enc = min(

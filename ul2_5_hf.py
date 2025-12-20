@@ -270,20 +270,37 @@ if TORCH_AVAILABLE:
         noise_lens = _random_segmentation(num_noise, num_spans, device)
         keep_lens = _random_segmentation(num_keep, num_spans, device)
 
-        # Interleave: [keep, noise, keep, noise, ...]
+        # Interleave segments with random start to avoid edge bias
         n = min(len(noise_lens), len(keep_lens))
-
         mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
         pos = 0
 
+        # Convert to lists once to avoid repeated .item() calls
+        noise_list = noise_lens.tolist()
+        keep_list = keep_lens.tolist()
+
+        # Randomize starting pattern to eliminate edge effect at seq end
+        start_with_noise = torch.rand(1, device=device).item() < 0.5
+
         for i in range(n):
-            # Keep segment
-            pos += keep_lens[i].item()
-            # Noise segment
-            noise_len = noise_lens[i].item()
-            end = min(pos + noise_len, seq_len)
-            mask[pos:end] = True
-            pos = end
+            if start_with_noise:
+                # Noise segment first
+                noise_len = noise_list[i]
+                end = min(pos + noise_len, seq_len)
+                mask[pos:end] = True
+                pos = end
+                # Then keep segment
+                pos += keep_list[i]
+            else:
+                # Keep segment first (original order)
+                pos += keep_list[i]
+                # Then noise segment
+                noise_len = noise_list[i]
+                end = min(pos + noise_len, seq_len)
+                mask[pos:end] = True
+                pos = end
+            if pos >= seq_len:
+                break
 
         return mask
 
@@ -443,28 +460,48 @@ class UL25DataCollator(DataCollatorMixin if HF_AVAILABLE else object):
             tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         )
 
-        # Cache encoded prefixes
+        # Cache encoded prefixes (store as CPU tensors, move to device during forward)
         self._prefix_cache: Dict[str, Tensor] = {}
         for spec in self.config.denoisers:
             if spec.prefix and spec.prefix not in self._prefix_cache:
                 ids = tokenizer.encode(spec.prefix, add_special_tokens=False)
                 self._prefix_cache[spec.prefix] = torch.tensor(ids, dtype=torch.long)
 
+        # Cache sampling weights tensor
+        self._weights = torch.tensor(self.config.weights, dtype=torch.float32)
+
         # Training progress for curriculum
         self._progress = 0.0
 
     def _get_sentinel_start(self) -> int:
-        """Get highest extra_id token ID."""
+        """Get highest extra_id token ID.
+
+        Detection order:
+        1. Direct conversion of <extra_id_0> (most reliable for T5 tokenizers)
+        2. Search special tokens for extra_id pattern (fallback)
+        3. Hardcoded 32099 default with warning
+        """
+        # Method 1: Direct token conversion (most reliable)
+        try:
+            token_id = self.tokenizer.convert_tokens_to_ids("<extra_id_0>")
+            if token_id != self.tokenizer.unk_token_id:
+                return token_id
+        except Exception:
+            pass
+
+        # Method 2: Search special tokens for extra_id pattern
         extra_ids = []
         for i, tok in enumerate(self.tokenizer.all_special_tokens):
-            if "extra" in tok.lower():
+            if "extra_id" in tok.lower():
                 extra_ids.append(self.tokenizer.all_special_ids[i])
-        if not extra_ids:
-            warnings.warn(
-                "No extra_id tokens found. Using 32099 as default sentinel start."
-            )
-            return 32099
-        return max(extra_ids)
+        if extra_ids:
+            return max(extra_ids)
+
+        # Method 3: Hardcoded default with warning
+        warnings.warn(
+            "No extra_id tokens found. Using 32099 as default sentinel start."
+        )
+        return 32099
 
     @property
     def progress(self) -> float:
@@ -476,12 +513,29 @@ class UL25DataCollator(DataCollatorMixin if HF_AVAILABLE else object):
         """Set training progress for curriculum learning."""
         self._progress = max(0.0, min(1.0, value))
 
+    def _get_curriculum_weights(self) -> Tensor:
+        """Get denoiser sampling weights (supports curriculum learning)."""
+        if self._progress == 0.0:
+            return self._weights
+        return torch.tensor(
+            self.config.get_weights(self._progress), dtype=torch.float32
+        )
+
     def _get_prefix(self, prefix: str, device: torch.device) -> Optional[Tensor]:
-        """Get prefix tensor on correct device."""
+        """Get prefix tensor on correct device (caches per-device)."""
         if not prefix:
             return None
-        tensor = self._prefix_cache.get(prefix)
-        return tensor.to(device) if tensor is not None else None
+        # Check for device-specific cached tensor
+        cache_key = (prefix, str(device))
+        if cache_key in self._prefix_cache:
+            return self._prefix_cache[cache_key]
+        # Get base tensor and cache device-specific version
+        base_tensor = self._prefix_cache.get(prefix)
+        if base_tensor is not None:
+            device_tensor = base_tensor.to(device)
+            self._prefix_cache[cache_key] = device_tensor
+            return device_tensor
+        return None
 
     def _sample_r(self, spec: DenoiserSpec) -> float:
         """Sample corruption rate."""
@@ -511,18 +565,19 @@ class UL25DataCollator(DataCollatorMixin if HF_AVAILABLE else object):
         else:
             return span_corruption_mask(seq_len, r, spec.mu, spec.max_spans, device)
 
-    def _process_single(self, input_ids: Tensor) -> Dict[str, Tensor]:
+    def _process_single(
+        self, input_ids: Tensor, denoiser_idx: Optional[int] = None
+    ) -> Dict[str, Tensor]:
         """Process single sequence with UL2.5 denoising."""
         device = input_ids.device
         seq_len = input_ids.shape[0]
 
-        # Sample denoiser with curriculum
-        weights = torch.tensor(
-            self.config.get_weights(self._progress), dtype=torch.float32
-        )
-        idx = torch.multinomial(weights, 1).item()
+        # Use provided index or sample denoiser
+        if denoiser_idx is None:
+            weights = self._get_curriculum_weights()
+            denoiser_idx = torch.multinomial(weights, 1).item()
 
-        spec = self.config.denoisers[idx]
+        spec = self.config.denoisers[denoiser_idx]
         prefix_ids = self._get_prefix(spec.prefix, device)
 
         # Generate mask
@@ -562,16 +617,23 @@ class UL25DataCollator(DataCollatorMixin if HF_AVAILABLE else object):
         first = examples[0]["input_ids"]
         device = first.device if isinstance(first, Tensor) else torch.device("cpu")
 
+        # Batch sample all denoiser indices at once (single multinomial call)
+        batch_size = len(examples)
+        weights = self._get_curriculum_weights()
+        denoiser_indices = (
+            torch.multinomial(weights.expand(batch_size, -1), 1).squeeze(-1).tolist()
+        )
+
         # Process examples
         processed = []
-        for ex in examples:
+        for i, ex in enumerate(examples):
             ids = ex["input_ids"]
             if not isinstance(ids, Tensor):
                 ids = torch.tensor(ids, dtype=torch.long, device=device)
             if ids.dim() == 2:
                 ids = ids.squeeze(0)
             ids = ids.to(device)
-            processed.append(self._process_single(ids))
+            processed.append(self._process_single(ids, denoiser_indices[i]))
 
         # Compute padded lengths
         max_enc = min(
