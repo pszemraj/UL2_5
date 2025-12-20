@@ -260,10 +260,10 @@ Sample output (RTX 4070 Laptop):
 ## Visualizations
 
 ### Mask Distributions
-![Mask Distributions](figures/mask_distributions_torch.png)
+![Mask Distributions](assets/mask_distributions_torch.png)
 
 ### Mask Examples
-![Mask Examples](figures/mask_examples_torch.png)
+![Mask Examples](assets/mask_examples_torch.png)
 
 ## License
 
