@@ -861,11 +861,9 @@ class UL25DataCollator:
 
     def _get_curriculum_weights(self) -> Tensor:
         """Get denoiser sampling weights (supports curriculum learning)."""
-        if self._progress == 0.0:
-            return self._weights
-        return torch.tensor(
-            self.config.get_weights(self._progress), dtype=torch.float32
-        )
+        # Always use get_weights to properly handle curriculum_start at progress 0
+        weights = self.config.get_weights(self._progress)
+        return torch.tensor(weights, dtype=torch.float32)
 
     def _get_length_adaptive_weights(self, seq_len: int) -> Tensor:
         """
