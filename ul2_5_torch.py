@@ -906,6 +906,13 @@ class UL25DataCollator:
         adjusted = adjusted / adjusted.sum()
         return adjusted
 
+    def _get_length_adaptive_weights_batch(self, seq_lens: List[int]) -> Tensor:
+        """Get per-example length-adaptive weights for a batch."""
+        return torch.stack(
+            [self._get_length_adaptive_weights(seq_len) for seq_len in seq_lens],
+            dim=0,
+        )
+
     def _get_prefix_ids(self, prefix: str, device: torch.device) -> Optional[Tensor]:
         """Get prefix token IDs on correct device (caches per-device)."""
         if not prefix:
@@ -1037,10 +1044,7 @@ class UL25DataCollator:
                 seq_lens.append(len(ids))
 
         # Sample denoiser indices per example (length-adaptive weights per sequence)
-        weights = torch.stack(
-            [self._get_length_adaptive_weights(seq_len) for seq_len in seq_lens],
-            dim=0,
-        )
+        weights = self._get_length_adaptive_weights_batch(seq_lens)
         denoiser_indices = torch.multinomial(weights, 1).squeeze(-1).tolist()
 
         # Process each example
@@ -1245,6 +1249,25 @@ def _run_tests():
     long_weights = collator._get_length_adaptive_weights(4096)
     print(f"  short seq (512): {[f'{w:.3f}' for w in short_weights.tolist()[:3]]}...")
     print(f"  long seq (4096): {[f'{w:.3f}' for w in long_weights.tolist()[:3]]}...")
+
+    # Test length-adaptive batch weights
+    print("\n[TEST] Length-adaptive batch weights")
+    batch_collator = UL25DataCollator(tokenizer, UL25Config.minimal())
+    if getattr(batch_collator.config, "enable_length_adaptive", True):
+        mixed_seq_lens = [256, 4096]
+        batch_weights = batch_collator._get_length_adaptive_weights_batch(
+            mixed_seq_lens
+        )
+        short_expected = batch_collator._get_length_adaptive_weights(
+            mixed_seq_lens[0]
+        )
+        long_expected = batch_collator._get_length_adaptive_weights(mixed_seq_lens[1])
+        assert torch.allclose(batch_weights[0], short_expected)
+        assert torch.allclose(batch_weights[1], long_expected)
+        assert not torch.allclose(batch_weights[0], batch_weights[1])
+        print("  per-example weights differ for mixed lengths")
+    else:
+        print("  length-adaptive disabled; skipping")
 
     # Benchmark
     print("\n[BENCHMARK] Throughput")
