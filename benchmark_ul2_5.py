@@ -1,53 +1,16 @@
 #!/usr/bin/env python3
-"""
-UL2.5 PyTorch/HF Collator Benchmark Suite
-==========================================
-
-Run with:
-    python benchmark_ul2_5.py
-
-Requirements:
-    pip install torch transformers matplotlib
-
-Tests:
-1. Correctness of all masking functions
-2. Speed benchmarks (CPU and GPU if available)
-3. Real tokenizer integration
-4. Visualization of mask distributions
-5. Comparison with NumPy baseline
-"""
+"""UL2.5 PyTorch/HF Collator Benchmark Suite."""
 
 import time
-import sys
+from pathlib import Path
 
-# Check dependencies
-try:
-    import torch
+import matplotlib
 
-    print(f"PyTorch: {torch.__version__}")
-except ImportError:
-    print("ERROR: PyTorch required. Install with: pip install torch")
-    sys.exit(1)
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import torch
+from transformers import AutoTokenizer
 
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib
-
-    matplotlib.use("Agg")  # Non-interactive backend
-    HAS_MATPLOTLIB = True
-except ImportError:
-    print("WARNING: matplotlib not found. Visualizations will be skipped.")
-    HAS_MATPLOTLIB = False
-
-try:
-    from transformers import AutoTokenizer
-
-    HAS_TRANSFORMERS = True
-except ImportError:
-    print("WARNING: transformers not found. Real tokenizer tests will be skipped.")
-    HAS_TRANSFORMERS = False
-
-# Import our implementations
 from ul2_5_hf import (
     UL25DataCollator,
     UL25Config,
@@ -57,6 +20,8 @@ from ul2_5_hf import (
     infilling_mask,
     create_sentinel_ids,
 )
+
+FIGURES_DIR = Path(__file__).parent / "figures"
 
 
 # =============================================================================
@@ -325,7 +290,6 @@ def benchmark_full_collator(device: torch.device):
 def benchmark_cpu_vs_gpu():
     """Compare CPU vs GPU performance."""
     if not torch.cuda.is_available():
-        print("\n[SKIP] CPU vs GPU benchmark - CUDA not available")
         return
 
     print("\n" + "=" * 60)
@@ -392,65 +356,48 @@ def benchmark_cpu_vs_gpu():
 
 def test_real_tokenizer():
     """Test with real HuggingFace tokenizer."""
-    if not HAS_TRANSFORMERS:
-        print("\n[SKIP] Real tokenizer test - transformers not installed")
-        return
-
     print("\n" + "=" * 60)
     print("REAL TOKENIZER TEST")
     print("=" * 60)
 
-    try:
-        tokenizer = AutoTokenizer.from_pretrained("google/t5-v1_1-small")
-        print(f"Loaded: google/t5-v1_1-small (vocab={tokenizer.vocab_size})")
+    tokenizer = AutoTokenizer.from_pretrained("google/t5-v1_1-small")
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["[R]", "[S]", "[X]", "[I]"]}
+    )
 
-        # Add UL2.5 special tokens
-        tokenizer.add_special_tokens(
-            {"additional_special_tokens": ["[R]", "[S]", "[X]", "[I]"]}
-        )
-        print("Added special tokens: [R], [S], [X], [I]")
+    device = get_device()
+    collator = UL25DataCollator(
+        tokenizer=tokenizer,
+        config=UL25Config.recommended(),
+        max_length=128,
+        max_labels_length=64,
+    )
 
-        device = get_device()
-        collator = UL25DataCollator(
-            tokenizer=tokenizer,
-            config=UL25Config.recommended(),
-            max_length=128,
-            max_labels_length=64,
-        )
+    texts = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Machine learning models are transforming software development.",
+        "BERT and T5 are popular transformer architectures for NLP.",
+    ]
 
-        # Test text
-        texts = [
-            "The quick brown fox jumps over the lazy dog.",
-            "Machine learning models are transforming software development.",
-            "BERT and T5 are popular transformer architectures for NLP.",
-        ]
+    examples = [
+        {
+            "input_ids": tokenizer(t, return_tensors="pt")["input_ids"]
+            .squeeze(0)
+            .to(device)
+        }
+        for t in texts
+    ]
+    batch = collator(examples)
 
-        examples = []
-        for text in texts:
-            tokens = tokenizer(text, return_tensors="pt", add_special_tokens=True)
-            examples.append({"input_ids": tokens["input_ids"].squeeze(0).to(device)})
+    print(f"  input_ids: {batch['input_ids'].shape}, labels: {batch['labels'].shape}")
 
-        batch = collator(examples)
-
-        print("\nBatch shapes:")
-        print(f"  input_ids: {batch['input_ids'].shape}")
-        print(f"  labels: {batch['labels'].shape}")
-        print(f"  attention_mask: {batch['attention_mask'].shape}")
-
-        # Decode example
-        print("\nExample 0:")
-        print(f"  Original: {texts[0]}")
-        enc_text = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
-        print(f"  Encoder:  {enc_text[:80]}...")
-
-        valid_labels = batch["labels"][0][batch["labels"][0] != -100]
-        dec_text = tokenizer.decode(valid_labels, skip_special_tokens=False)
-        print(f"  Decoder:  {dec_text[:80]}...")
-
-        print("\n✓ Real tokenizer test passed")
-
-    except Exception as e:
-        print(f"\n✗ Real tokenizer test failed: {e}")
+    enc_text = tokenizer.decode(batch["input_ids"][0], skip_special_tokens=False)
+    valid_labels = batch["labels"][0][batch["labels"][0] != -100]
+    dec_text = tokenizer.decode(valid_labels, skip_special_tokens=False)
+    print(f"  Original: {texts[0]}")
+    print(f"  Encoder:  {enc_text[:80]}...")
+    print(f"  Decoder:  {dec_text[:80]}...")
+    print("  ✓ Passed")
 
 
 # =============================================================================
@@ -460,13 +407,11 @@ def test_real_tokenizer():
 
 def create_visualizations(device: torch.device):
     """Generate visualization plots."""
-    if not HAS_MATPLOTLIB:
-        print("\n[SKIP] Visualizations - matplotlib not installed")
-        return
-
     print("\n" + "=" * 60)
     print("GENERATING VISUALIZATIONS")
     print("=" * 60)
+
+    FIGURES_DIR.mkdir(exist_ok=True)
 
     seq_len = 100
     n_samples = 1000
@@ -504,9 +449,10 @@ def create_visualizations(device: torch.device):
         ax.grid(True, alpha=0.2, color="white")
 
     plt.tight_layout()
-    plt.savefig("mask_distributions_torch.png", dpi=150, facecolor="#1a1a2e")
+    out_path = FIGURES_DIR / "mask_distributions_torch.png"
+    plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
     plt.close()
-    print("  Saved: mask_distributions_torch.png")
+    print(f"  Saved: {out_path}")
 
     # 2. Single mask examples
     fig, axes = plt.subplots(6, 1, figsize=(14, 10), facecolor="#1a1a2e")
@@ -551,9 +497,10 @@ def create_visualizations(device: torch.device):
         "UL2.5 Mask Examples (PyTorch)", color="white", fontsize=14, fontweight="bold"
     )
     plt.tight_layout()
-    plt.savefig("mask_examples_torch.png", dpi=150, facecolor="#1a1a2e")
+    out_path = FIGURES_DIR / "mask_examples_torch.png"
+    plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
     plt.close()
-    print("  Saved: mask_examples_torch.png")
+    print(f"  Saved: {out_path}")
 
     # 3. Benchmark chart
     results = benchmark_masking_functions(device)
@@ -596,9 +543,10 @@ def create_visualizations(device: torch.device):
     ax.grid(True, alpha=0.2, color="white", axis="y")
 
     plt.tight_layout()
-    plt.savefig("benchmark_torch.png", dpi=150, facecolor="#1a1a2e")
+    out_path = FIGURES_DIR / "benchmark_torch.png"
+    plt.savefig(out_path, dpi=150, facecolor="#1a1a2e")
     plt.close()
-    print("  Saved: benchmark_torch.png")
+    print(f"  Saved: {out_path}")
 
 
 # =============================================================================
@@ -628,21 +576,6 @@ def main():
     print("\n" + "=" * 60)
     print("BENCHMARK COMPLETE")
     print("=" * 60)
-
-    # Summary
-    print("""
-SUMMARY
--------
-Files generated (if matplotlib installed):
-  - mask_distributions_torch.png
-  - mask_examples_torch.png  
-  - benchmark_torch.png
-
-Key metrics to compare with NumPy baseline:
-  - Masking function times at seq_len=512
-  - Full collator throughput (tokens/sec)
-  - GPU speedup (if CUDA available)
-""")
 
 
 if __name__ == "__main__":
