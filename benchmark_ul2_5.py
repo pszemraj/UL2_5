@@ -624,7 +624,7 @@ def visualize_span_contiguity(device: torch.device):
 
 
 def visualize_boundary_snapping():
-    """Visualize before/after boundary snapping effect."""
+    """Visualize before/after boundary snapping effect with multiple samples."""
     print("\n[VIZ] Boundary snapping")
 
     try:
@@ -643,93 +643,127 @@ def visualize_boundary_snapping():
     tokens = tokenizer.convert_ids_to_tokens(input_ids.tolist())
 
     # Detect word boundaries
-    word_boundaries = [0]
+    word_boundaries = set([0])
     for i in range(1, seq_len):
         tok = tokens[i]
         if tok and (tok.startswith("▁") or tok.startswith(" ") or tok.startswith("<")):
-            word_boundaries.append(i)
+            word_boundaries.add(i)
 
-    # Generate mask on CPU
+    # Generate multiple samples and find ones where snapping makes a visible difference
     device = torch.device("cpu")
-    torch.manual_seed(42)  # For reproducibility
-    original_mask = span_corruption_mask(seq_len, 0.25, 3.0, 512, device)
+    n_examples = 4
+    examples = []
 
-    # Apply boundary snapping
-    snapped_mask = snap_mask_to_word_boundaries(original_mask, input_ids, tokenizer)
+    for seed in range(100):
+        torch.manual_seed(seed)
+        original_mask = span_corruption_mask(seq_len, 0.30, 2.0, 512, device)
+        snapped_mask = snap_mask_to_word_boundaries(original_mask, input_ids, tokenizer)
 
-    fig, axes = plt.subplots(3, 1, figsize=(14, 8), facecolor="#1a1a2e")
+        # Count positions that changed
+        diff = (original_mask != snapped_mask).sum().item()
+        if diff > 0:
+            examples.append((seed, original_mask.clone(), snapped_mask.clone(), diff))
+            if len(examples) >= n_examples:
+                break
 
-    # Panel 1: Original mask
-    ax = axes[0]
-    ax.set_facecolor("#16213e")
-    colors = ["#00d9ff" if not m else "#ff6b6b" for m in original_mask.tolist()]
-    ax.bar(range(seq_len), [1] * seq_len, color=colors, width=1.0)
-    for wb in word_boundaries:
-        ax.axvline(wb - 0.5, color="#ffd93d", linestyle="-", linewidth=1, alpha=0.7)
-    orig_density = original_mask.float().mean().item()
-    ax.set_title(
-        f"Original Mask (density={orig_density:.1%})",
-        color="white",
-        fontsize=10,
-        fontweight="bold",
+    if len(examples) < n_examples:
+        # Fill with any examples if we didn't find enough with differences
+        for seed in range(100, 200):
+            if len(examples) >= n_examples:
+                break
+            torch.manual_seed(seed)
+            original_mask = span_corruption_mask(seq_len, 0.30, 2.0, 512, device)
+            snapped_mask = snap_mask_to_word_boundaries(
+                original_mask, input_ids, tokenizer
+            )
+            examples.append((seed, original_mask.clone(), snapped_mask.clone(), 0))
+
+    fig, axes = plt.subplots(
+        n_examples, 2, figsize=(14, 2.5 * n_examples), facecolor="#1a1a2e"
     )
-    ax.set_yticks([])
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-        spine.set_visible(False)
 
-    # Panel 2: Snapped mask
-    ax = axes[1]
-    ax.set_facecolor("#16213e")
-    colors = ["#00d9ff" if not m else "#ff6b6b" for m in snapped_mask.tolist()]
-    ax.bar(range(seq_len), [1] * seq_len, color=colors, width=1.0)
-    for wb in word_boundaries:
-        ax.axvline(wb - 0.5, color="#ffd93d", linestyle="-", linewidth=1, alpha=0.7)
-    snap_density = snapped_mask.float().mean().item()
-    ax.set_title(
-        f"After Boundary Snapping (density={snap_density:.1%})",
-        color="white",
-        fontsize=10,
-        fontweight="bold",
-    )
-    ax.set_yticks([])
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    # Panel 3: Token labels
-    ax = axes[2]
-    ax.set_facecolor("#16213e")
-    ax.bar(range(seq_len), [1] * seq_len, color="#16213e", width=1.0)
-    for i, tok in enumerate(tokens):
-        color = "#ffd93d" if i in word_boundaries else "#888888"
-        ax.text(
-            i,
-            0.5,
-            tok[:6] if tok else "",
-            ha="center",
-            va="center",
-            fontsize=7,
-            color=color,
-            rotation=90,
+    for row, (seed, original_mask, snapped_mask, diff) in enumerate(examples):
+        # Left: Original mask
+        ax = axes[row, 0]
+        ax.set_facecolor("#16213e")
+        colors = []
+        for i, m in enumerate(original_mask.tolist()):
+            if m:
+                # Highlight positions that will change in orange
+                if original_mask[i] != snapped_mask[i]:
+                    colors.append("#ffa500")  # Orange for changed
+                else:
+                    colors.append("#ff6b6b")  # Red for masked
+            else:
+                colors.append("#00d9ff")  # Cyan for kept
+        ax.bar(range(seq_len), [1] * seq_len, color=colors, width=1.0)
+        for wb in word_boundaries:
+            ax.axvline(wb - 0.5, color="#ffd93d", linestyle="-", linewidth=1, alpha=0.5)
+        orig_density = original_mask.float().mean().item()
+        ax.set_title(
+            f"Original (density={orig_density:.1%})",
+            color="white",
+            fontsize=9,
+            fontweight="bold",
         )
-    ax.set_title(
-        "Tokens (yellow = word boundary)",
-        color="white",
-        fontsize=10,
-        fontweight="bold",
-    )
-    ax.set_yticks([])
-    ax.set_xlim(-0.5, seq_len - 0.5)
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-        spine.set_visible(False)
+        ax.set_yticks([])
+        ax.tick_params(colors="white")
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        if row == 0:
+            ax.text(
+                0.02,
+                0.85,
+                "orange = will shift",
+                transform=ax.transAxes,
+                color="#ffa500",
+                fontsize=8,
+            )
 
-    axes[-1].set_xlabel(
-        "Position (blue=kept, red=masked, yellow lines=word boundaries)", color="white"
-    )
+        # Right: Snapped mask
+        ax = axes[row, 1]
+        ax.set_facecolor("#16213e")
+        colors = []
+        for i, m in enumerate(snapped_mask.tolist()):
+            if m:
+                # Highlight positions that changed in green
+                if original_mask[i] != snapped_mask[i]:
+                    colors.append("#6bcb77")  # Green for newly masked
+                else:
+                    colors.append("#ff6b6b")  # Red for masked
+            else:
+                colors.append("#00d9ff")  # Cyan for kept
+        ax.bar(range(seq_len), [1] * seq_len, color=colors, width=1.0)
+        for wb in word_boundaries:
+            ax.axvline(wb - 0.5, color="#ffd93d", linestyle="-", linewidth=1, alpha=0.5)
+        snap_density = snapped_mask.float().mean().item()
+        ax.set_title(
+            f"After Snapping (density={snap_density:.1%}, {diff} pos changed)",
+            color="white",
+            fontsize=9,
+            fontweight="bold",
+        )
+        ax.set_yticks([])
+        ax.tick_params(colors="white")
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        if row == 0:
+            ax.text(
+                0.02,
+                0.85,
+                "green = shifted here",
+                transform=ax.transAxes,
+                color="#6bcb77",
+                fontsize=8,
+            )
+
+    # Add token labels at bottom
+    axes[-1, 0].set_xlabel("Position", color="white")
+    axes[-1, 1].set_xlabel("Position", color="white")
+
     plt.suptitle(
-        "Span Boundary Snapping\n(aligns span starts to word-initial tokens)",
+        "Span Boundary Snapping: Multiple Examples\n"
+        "(yellow lines = word boundaries, spans shift to align with word-initial tokens)",
         color="white",
         fontsize=12,
         fontweight="bold",
