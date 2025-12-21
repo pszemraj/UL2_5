@@ -3,6 +3,9 @@
 *.jpg
 *.jpeg
 
+# setuptools-scm generated
+src/UL2_5/_version.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
