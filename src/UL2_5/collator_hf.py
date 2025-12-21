@@ -418,7 +418,8 @@ def create_ul25_collator(
 
     Args:
         tokenizer: HuggingFace tokenizer
-        preset: One of "recommended", "curriculum", "ul2", "t5", "minimal", "span_heavy"
+        preset: One of "recommended", "curriculum", "ul2", "t5", "minimal",
+                "span_heavy", "flan_ul2"
         max_length: Max encoder length
         max_labels_length: Max decoder length
         **kwargs: Additional args for UL25DataCollator
@@ -433,6 +434,7 @@ def create_ul25_collator(
         "t5": UL25Config.t5_standard,
         "minimal": UL25Config.minimal,
         "span_heavy": UL25Config.span_heavy,
+        "flan_ul2": UL25Config.flan_ul2_finetune,
     }
 
     if preset not in presets:

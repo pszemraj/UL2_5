@@ -247,3 +247,30 @@ class UL25Config(BaseModel):
             ],
             weights=[0.5, 0.5],
         )
+
+    @classmethod
+    def flan_ul2_finetune(cls) -> UL25Config:
+        """
+        Configuration for fine-tuning from Flan-UL2 checkpoint.
+
+        Flan-UL2 was trained to "forget" mode tokens, so this preset
+        omits all [R]/[S]/[X]/[I] prefixes. Use this when:
+        - Fine-tuning google/flan-ul2 checkpoint
+        - Training models that will be instruction-tuned later
+        - Simpler deployment (no prefix handling at inference)
+
+        Same mixture as recommended() but with empty prefixes.
+        Supports 2048 context length (Flan-UL2 default).
+        """
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix=""),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix=""),
+                DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix=""),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix=""),
+                DenoiserSpec(task=Task.PREFIX_SHORT, prefix=""),
+                DenoiserSpec(task=Task.PREFIX_LONG, prefix=""),
+                DenoiserSpec(task=Task.INFILLING, r=0.30, prefix=""),
+            ],
+            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+        )
