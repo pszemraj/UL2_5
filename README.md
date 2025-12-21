@@ -208,27 +208,27 @@ from UL2_5 import UL25Config, DenoiserSpec, Task
 
 config = UL25Config(
     denoisers=[
-        # Standard span corruption (T5-style)
+        # Regular span corruption (r<50%, mu<12 → [R])
         DenoiserSpec(
             task=Task.SPAN,
             mu=3.0,           # Mean span length
             r=0.15,           # 15% corruption rate
-            prefix="[S]",     # Task prefix token
+            prefix="[R]",     # Regular mode token
         ),
-        # Extreme span corruption
+        # Extreme span corruption (r>=50% → [X])
         DenoiserSpec(
             task=Task.SPAN,
             mu=32.0,          # Longer spans
             r=0.5,            # 50% corruption
-            prefix="[X]",
+            prefix="[X]",     # eXtreme mode token
         ),
-        # Prefix LM (causal generation)
+        # Prefix LM (sequential generation → [S])
         DenoiserSpec(
             task=Task.PREFIX_RANDOM,
-            prefix="[R]",
+            prefix="[S]",     # Sequential mode token
         ),
     ],
-    weights=[0.4, 0.3, 0.3],  # Sampling probabilities
+    weights=[0.4, 0.3, 0.3],  # Sampling probabilities (must sum to 1)
 )
 
 collator = UL25DataCollator(tokenizer, config)
