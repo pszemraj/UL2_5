@@ -294,11 +294,43 @@ Sample output (RTX 4070 Laptop):
 
 ### Mask Distributions
 
+Position-wise masking probability for each task type (averaged over 1000 samples):
+
 ![Mask Distributions](assets/mask_distributions_torch.png)
 
 ### Mask Examples
 
+Single examples showing contiguous spans for each task type:
+
 ![Mask Examples](assets/mask_examples_torch.png)
+
+### Length-Adaptive Task Weights
+
+Task weights automatically adjust based on sequence length. PREFIX and INFILLING tasks are boosted for sequences >1024 tokens:
+
+![Length-Adaptive Weights](assets/length_adaptive_weights.png)
+
+### Middle-Heavy Span Analysis
+
+Verification that middle-heavy masking produces actual contiguous spans (not scattered tokens), with Gaussian position bias toward the middle:
+
+![Middle-Heavy Span Analysis](assets/middle_heavy_span_analysis.png)
+
+### Curriculum Learning Progression
+
+Weight evolution during training: starts span-heavy (easier), shifts to prefix-heavy (realistic):
+
+![Curriculum Progression](assets/curriculum_progression.png)
+
+### Performance Benchmark
+
+Runtime comparison of masking functions across sequence lengths (log scale):
+
+![Benchmark](assets/benchmark_torch.png)
+
+### Additional Visualizations
+
+- [Boundary Snapping Comparison](assets/boundary_snapping_comparison.png) - Before/after visualization of span boundary snapping to word-initial tokens
 
 ---
 
