@@ -2,18 +2,52 @@
 
 from __future__ import annotations
 
+import warnings
+
 import torch
 from torch import Tensor
 
 
-def create_sentinel_ids(mask: Tensor, sentinel_start: int) -> Tensor:
-    """Convert boolean mask to sentinel token IDs."""
+def create_sentinel_ids(
+    mask: Tensor,
+    sentinel_start: int,
+    max_sentinels: int = 100,
+) -> Tensor:
+    """
+    Convert boolean mask to sentinel token IDs.
+
+    Args:
+        mask: Boolean mask tensor [seq_len] where True = masked position
+        sentinel_start: Highest sentinel token ID (e.g., 32099 for <extra_id_0>)
+        max_sentinels: Maximum number of sentinel tokens available (default: 100)
+
+    Returns:
+        Tensor of sentinel IDs where:
+        - Span starts get sentinel IDs (sentinel_start, sentinel_start-1, ...)
+        - Span continuations get -1 (to be filtered later)
+        - Non-masked positions get 0
+    """
     device = mask.device
+
+    # Handle empty mask
+    if mask.numel() == 0:
+        return torch.zeros(0, dtype=torch.long, device=device)
 
     shifted = torch.cat([torch.zeros(1, dtype=torch.bool, device=device), mask[:-1]])
     span_starts = mask & ~shifted
 
     cumsum = torch.cumsum(span_starts.int(), dim=0)
+
+    # Check for overflow: if more spans than sentinels, clamp with warning
+    max_span_id = cumsum.max().item() if cumsum.numel() > 0 else 0
+    if max_span_id > max_sentinels:
+        warnings.warn(
+            f"Clamping {max_span_id} spans to {max_sentinels} available sentinels. "
+            f"Consider reducing noise_density or max_spans in DenoiserSpec.",
+            stacklevel=2,
+        )
+        cumsum = torch.clamp(cumsum, max=max_sentinels)
+
     sentinel_ids = torch.where(
         span_starts, sentinel_start - cumsum + 1, torch.zeros_like(cumsum)
     )

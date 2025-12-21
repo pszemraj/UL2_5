@@ -609,8 +609,8 @@ def visualize_span_contiguity(device: torch.device):
     ax.grid(True, alpha=0.2, color="white")
 
     plt.suptitle(
-        f"Middle-Heavy Span Analysis (n={n_samples} samples)\n"
-        f"avg {np.mean(span_counts):.1f} spans per sample, NOT scattered tokens",
+        f"Middle-Heavy Span Analysis\n"
+        f"Contiguous spans (not scattered) · {np.mean(span_counts):.1f} spans/sample avg · n={n_samples}",
         color="white",
         fontsize=12,
         fontweight="bold",
@@ -713,10 +713,16 @@ def visualize_boundary_snapping():
             ax.text(
                 0.02,
                 0.85,
-                "orange = will shift",
+                "● orange = will shift",
                 transform=ax.transAxes,
                 color="#ffa500",
-                fontsize=8,
+                fontsize=11,
+                fontweight="bold",
+                bbox={
+                    "boxstyle": "round,pad=0.3",
+                    "facecolor": "#1a1a2e",
+                    "alpha": 0.8,
+                },
             )
 
         # Right: Snapped mask
@@ -750,10 +756,16 @@ def visualize_boundary_snapping():
             ax.text(
                 0.02,
                 0.85,
-                "green = shifted here",
+                "● green = shifted here",
                 transform=ax.transAxes,
                 color="#6bcb77",
-                fontsize=8,
+                fontsize=11,
+                fontweight="bold",
+                bbox={
+                    "boxstyle": "round,pad=0.3",
+                    "facecolor": "#1a1a2e",
+                    "alpha": 0.8,
+                },
             )
 
     # Add token labels at bottom
@@ -892,18 +904,24 @@ def create_visualizations(device: torch.device):
         ("Infilling", lambda: infilling_mask(seq_len, 0.3, device)[0]),
     ]
 
-    for ax, (title, func) in zip(axes.flat, configs):
-        ax.set_facecolor("#16213e")
-
+    # First pass: compute all masks to find global max for consistent y-scale
+    all_avg_masks = []
+    for title, func in configs:
         masks = torch.stack([func() for _ in range(n_samples)])
         avg_mask = masks.float().mean(dim=0).cpu().numpy()
+        all_avg_masks.append((title, avg_mask))
 
+    # Use consistent y-scale: 0 to 1.0 for all plots (probability scale)
+    y_max = 1.05
+
+    for ax, (title, avg_mask) in zip(axes.flat, all_avg_masks):
+        ax.set_facecolor("#16213e")
         ax.bar(range(seq_len), avg_mask, color="#00d9ff", alpha=0.8, width=1.0)
         ax.set_title(title, color="white", fontsize=11, fontweight="bold")
         ax.set_xlabel("Position", color="white")
         ax.set_ylabel("P(masked)", color="white")
         ax.tick_params(colors="white")
-        ax.set_ylim(0, max(0.5, avg_mask.max() * 1.1))
+        ax.set_ylim(0, y_max)
 
         for spine in ax.spines.values():
             spine.set_color("#444")

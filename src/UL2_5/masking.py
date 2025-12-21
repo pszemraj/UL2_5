@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import torch
 from torch import Tensor
+
+# Minimum sequence lengths for meaningful masking
+MIN_SEQ_LEN_SPAN = 3  # Need at least 3 tokens for span corruption
+MIN_SEQ_LEN_PREFIX = 2  # Need at least prefix + suffix
+MIN_SEQ_LEN_INFILL = 3  # Need context + hole
+
+# Warning state for GPU boundary snapping
+_BOUNDARY_SNAP_GPU_WARNING_SHOWN = False
 
 
 def _random_segmentation(n_items: int, n_segments: int, device: torch.device) -> Tensor:
@@ -34,6 +43,10 @@ def span_corruption_mask(
     device: torch.device,
 ) -> Tensor:
     """Generate T5-style span corruption mask."""
+    # Handle edge cases
+    if seq_len < MIN_SEQ_LEN_SPAN:
+        return torch.zeros(seq_len, dtype=torch.bool, device=device)
+
     num_noise = max(1, min(int(round(seq_len * r)), seq_len - 1))
     num_spans = max(1, min(max_spans, int(round(num_noise / mu))))
     num_keep = seq_len - num_noise
@@ -102,6 +115,10 @@ def middle_heavy_span_mask(
     Returns:
         Boolean tensor [seq_len] where True = corrupted/masked
     """
+    # Handle edge cases
+    if seq_len < MIN_SEQ_LEN_SPAN:
+        return torch.zeros(seq_len, dtype=torch.bool, device=device)
+
     num_noise = max(1, min(int(round(seq_len * noise_density)), seq_len - 1))
     num_spans = max(1, int(round(num_noise / mean_span_length)))
 
@@ -197,6 +214,13 @@ def middle_heavy_span_mask(
 
 def prefix_lm_mask(seq_len: int, mode: str, device: torch.device) -> tuple[Tensor, int]:
     """Generate prefix LM mask with various split strategies."""
+    # Handle edge cases
+    if seq_len < MIN_SEQ_LEN_PREFIX:
+        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+        if seq_len > 1:
+            mask[1:] = True
+        return mask, max(0, seq_len - 1)
+
     if mode == "random":
         split = torch.randint(
             int(0.2 * seq_len), int(0.8 * seq_len) + 1, (1,), device=device
@@ -220,6 +244,13 @@ def infilling_mask(
     seq_len: int, hole_frac: float, device: torch.device
 ) -> tuple[Tensor, int, int]:
     """Generate infilling mask (mask middle portion)."""
+    # Handle edge cases
+    if seq_len < MIN_SEQ_LEN_INFILL:
+        mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
+        if seq_len > 1:
+            mask[1:] = True
+        return mask, 1 if seq_len > 1 else 0, seq_len
+
     hole_size = max(1, int(hole_frac * seq_len))
     min_start = int(0.1 * seq_len)
     max_start = max(min_start, int(0.9 * seq_len) - hole_size)
@@ -240,6 +271,7 @@ def snap_mask_to_word_boundaries(
     mask: Tensor,
     input_ids: Tensor,
     tokenizer: Any,
+    warn_on_skip: bool = True,
 ) -> Tensor:
     """
     Snap mask boundaries to word/token boundaries.
@@ -254,11 +286,21 @@ def snap_mask_to_word_boundaries(
         mask: Boolean mask tensor [seq_len]
         input_ids: Token IDs tensor [seq_len]
         tokenizer: Tokenizer with convert_ids_to_tokens method
+        warn_on_skip: Whether to warn when skipping GPU tensors (default True)
 
     Returns:
         Adjusted mask tensor [seq_len]
     """
+    global _BOUNDARY_SNAP_GPU_WARNING_SHOWN
+
     if mask.device.type != "cpu":
+        if warn_on_skip and not _BOUNDARY_SNAP_GPU_WARNING_SHOWN:
+            warnings.warn(
+                "snap_mask_to_word_boundaries skipped for GPU tensor. "
+                "Pass CPU tensors or set enable_boundary_snapping=False in config.",
+                stacklevel=2,
+            )
+            _BOUNDARY_SNAP_GPU_WARNING_SHOWN = True
         return mask
 
     seq_len = int(mask.shape[0])
