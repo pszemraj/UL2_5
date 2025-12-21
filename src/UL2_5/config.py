@@ -135,12 +135,20 @@ class UL25Config(BaseModel):
     @classmethod
     def recommended(cls) -> UL25Config:
         """
-        Recommended configuration based on feasibility analysis.
+        Recommended UL2.5 configuration with balanced mixture.
+
+        Prefix semantics (per UL2 paper):
+        - [R] = Regular denoising (r < 50%, mu < 12)
+        - [S] = Sequential / Prefix LM
+        - [X] = eXtreme denoising (r >= 50% OR mu >= 12)
+        - [I] = Infilling (UL2.5 extension, not in original paper)
 
         Mixture:
-        - 30% span denoising (standard + middle-heavy)
-        - 50% prefix LM variants
-        - 20% infilling
+        - 30% span denoising ([R] standard + [X] middle-heavy with mu=12)
+        - 50% prefix LM variants ([S])
+        - 20% infilling ([I])
+
+        Note: SPAN_MIDDLE with mu=12 uses [X] because mu >= 12 qualifies as extreme.
         """
         return cls(
             denoisers=[
@@ -180,7 +188,20 @@ class UL25Config(BaseModel):
 
     @classmethod
     def ul2_original(cls) -> UL25Config:
-        """Original UL2 7-denoiser mixture."""
+        """
+        Original UL2 7-denoiser mixture (Table 2 from the paper).
+
+        Prefix semantics:
+        - [R] = Regular (r=15%, mu in {3, 8})
+        - [S] = Sequential (Prefix LM)
+        - [X] = eXtreme (r=50% OR mu=64)
+
+        Weights match paper: R=33%, S=34%, X=33%
+
+        Note: Original UL2 used max_length=512. For Flan-UL2 (2048 context),
+        use flan_ul2_finetune() which omits mode tokens as Flan-UL2 was trained
+        to "forget" them.
+        """
         return cls(
             denoisers=[
                 DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),

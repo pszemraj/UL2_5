@@ -72,14 +72,47 @@ class UL25DataCollator(DataCollatorMixin):
         self._prefix_cache: dict[str, Tensor] = {}
         for spec in self.config.denoisers:
             if spec.prefix and spec.prefix not in self._prefix_cache:
-                ids = tokenizer.encode(spec.prefix, add_special_tokens=False)
+                ids = self._encode_prefix(spec.prefix)
                 self._prefix_cache[spec.prefix] = torch.tensor(ids, dtype=torch.long)
 
         # Cache sampling weights tensor
         self._weights = torch.tensor(self.config.weights, dtype=torch.float32)
 
+        # Weight caching for curriculum (invalidated on progress change)
+        self._weight_cache: dict[tuple[float, str], Tensor] = {}
+
         # Training progress for curriculum
         self._progress = 0.0
+
+    def _encode_prefix(self, prefix: str) -> list[int]:
+        """
+        Encode prefix token, preferring special token lookup.
+
+        Checks if prefix is a registered special token first (single ID),
+        falls back to encode() with a warning if multi-token encoding occurs.
+        """
+        if not prefix:
+            return []
+
+        # Try special token lookup first (preferred for [R], [S], [X], [I])
+        try:
+            token_id = self.tokenizer.convert_tokens_to_ids(prefix)
+            unk_id = getattr(self.tokenizer, "unk_token_id", None)
+            if token_id != unk_id and token_id is not None:
+                return [token_id]
+        except Exception:
+            pass
+
+        # Fallback to encode (may produce multiple tokens)
+        ids = self.tokenizer.encode(prefix, add_special_tokens=False)
+        if len(ids) > 1:
+            warnings.warn(
+                f"Prefix '{prefix}' encoded to {len(ids)} tokens. "
+                f"Consider adding it as a special token: "
+                f"tokenizer.add_special_tokens({{'additional_special_tokens': ['{prefix}']}})",
+                stacklevel=3,
+            )
+        return ids
 
     def _get_sentinel_start(self) -> int:
         """Get highest extra_id token ID.
@@ -120,13 +153,24 @@ class UL25DataCollator(DataCollatorMixin):
     @progress.setter
     def progress(self, value: float):
         """Set training progress for curriculum learning."""
-        self._progress = max(0.0, min(1.0, value))
+        new_progress = max(0.0, min(1.0, value))
+        if new_progress != self._progress:
+            self._weight_cache.clear()  # Invalidate cache on progress change
+        self._progress = new_progress
 
-    def _get_curriculum_weights(self) -> Tensor:
-        """Get denoiser sampling weights (supports curriculum learning)."""
-        # Always use get_weights to properly handle curriculum_start at progress 0
-        weights = self.config.get_weights(self._progress)
-        return torch.tensor(weights, dtype=torch.float32)
+    def _get_curriculum_weights(self, device: torch.device | None = None) -> Tensor:
+        """Get denoiser sampling weights (cached per progress/device)."""
+        device_key = str(device) if device else "cpu"
+        cache_key = (round(self._progress, 4), device_key)
+
+        if cache_key not in self._weight_cache:
+            weights = self.config.get_weights(self._progress)
+            tensor = torch.tensor(weights, dtype=torch.float32)
+            if device is not None and device.type != "cpu":
+                tensor = tensor.to(device)
+            self._weight_cache[cache_key] = tensor
+
+        return self._weight_cache[cache_key]
 
     def _get_length_adaptive_weights(self, seq_len: int) -> Tensor:
         """
@@ -278,7 +322,7 @@ class UL25DataCollator(DataCollatorMixin):
             examples: List of dicts with "input_ids"
 
         Returns:
-            Dict with "input_ids", "attention_mask", "labels"
+            Dict with "input_ids", "attention_mask", "labels", "decoder_input_ids"
         """
         # Determine device
         first = examples[0]["input_ids"]
@@ -332,6 +376,9 @@ class UL25DataCollator(DataCollatorMixin):
         labels = torch.full(
             (batch_size, max_dec), -100, dtype=torch.long, device=device
         )
+        decoder_input_ids = torch.full(
+            (batch_size, max_dec), self.pad_id, dtype=torch.long, device=device
+        )
 
         # Fill
         for i, p in enumerate(processed):
@@ -342,10 +389,16 @@ class UL25DataCollator(DataCollatorMixin):
             attention_mask[i, :enc_len] = 1
             labels[i, :dec_len] = dec[:dec_len]
 
+            # Right-shift for decoder_input_ids (T5-style teacher forcing)
+            # Position 0 is already pad_id; fill positions 1:dec_len with labels[0:dec_len-1]
+            if dec_len > 1:
+                decoder_input_ids[i, 1:dec_len] = dec[: dec_len - 1]
+
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
+            "decoder_input_ids": decoder_input_ids,
         }
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, Tensor]:
