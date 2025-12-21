@@ -8,12 +8,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-import numpy as np
-
-from ul2_5_hf import (
+from UL2_5 import (
     UL25Config,
     UL25DataCollator,
     create_sentinel_ids,
@@ -643,7 +642,7 @@ def visualize_boundary_snapping():
     tokens = tokenizer.convert_ids_to_tokens(input_ids.tolist())
 
     # Detect word boundaries
-    word_boundaries = set([0])
+    word_boundaries = {0}
     for i in range(1, seq_len):
         tok = tokens[i]
         if tok and (tok.startswith("▁") or tok.startswith(" ") or tok.startswith("<")):
@@ -682,7 +681,7 @@ def visualize_boundary_snapping():
         n_examples, 2, figsize=(14, 2.5 * n_examples), facecolor="#1a1a2e"
     )
 
-    for row, (seed, original_mask, snapped_mask, diff) in enumerate(examples):
+    for row, (_seed, original_mask, snapped_mask, diff) in enumerate(examples):
         # Left: Original mask
         ax = axes[row, 0]
         ax.set_facecolor("#16213e")

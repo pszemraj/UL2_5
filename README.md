@@ -11,7 +11,7 @@ GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementin
 - **Curriculum learning**: Gradually shift denoiser mixture during training
 - **Length-adaptive sampling**: Boost long-context tasks for long sequences
 - **Span boundary snapping**: Align span starts to word boundaries (CPU only)
-- **Two implementations**: HF-integrated (`ul2_5_hf.py`) or pure PyTorch (`ul2_5_torch.py`)
+- **Two implementations**: HF-integrated (`collator_hf.py`) or pure PyTorch (`collator_torch.py`)
 
 ---
 
@@ -39,19 +39,19 @@ GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementin
 pip install torch>=2.0.0 transformers>=4.30.0 sentencepiece pydantic>=2.0.0
 ```
 
-Or clone and install dependencies:
+Or clone and install in editable mode:
 
 ```bash
 git clone <repo-url>
 cd UL2_5
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 ## Quick Start
 
 ```python
 from transformers import AutoTokenizer, T5ForConditionalGeneration
-from ul2_5_hf import UL25DataCollator, UL25Config
+from UL2_5 import UL25DataCollator, UL25Config
 
 # Load model and tokenizer
 tokenizer = AutoTokenizer.from_pretrained("google-t5/t5-base")
@@ -137,7 +137,7 @@ for batch in dataloader:
 Gradually shift the denoiser mixture during training:
 
 ```python
-from ul2_5_hf import UL25DataCollator, UL25Config
+from UL2_5 import UL25DataCollator, UL25Config
 
 collator = UL25DataCollator(
     tokenizer=tokenizer,
@@ -158,7 +158,7 @@ for epoch in range(num_epochs):
 ## Custom Configuration
 
 ```python
-from ul2_5_hf import UL25Config, DenoiserSpec, Task
+from UL2_5 import UL25Config, DenoiserSpec, Task
 
 config = UL25Config(
     denoisers=[

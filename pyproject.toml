@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "UL2_5"
+version = "0.1.0"
+description = "GPU-optimized UL2.5 data collation for encoder-decoder models"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "pszemraj" }]
+keywords = ["nlp", "transformers", "t5", "ul2", "data-collation", "pytorch"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = ["torch>=2.0.0", "pydantic>=2.0.0"]
+
+[project.optional-dependencies]
+transformers = ["transformers>=4.30.0"]
+dev = [
+    "transformers>=4.30.0",
+    "sentencepiece>=0.1.99",
+    "matplotlib>=3.5.0",
+    "seaborn>=0.12.0",
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
+all = ["UL2_5[transformers,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/pszemraj/UL2_5"
+Repository = "https://github.com/pszemraj/UL2_5"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/UL2_5"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
