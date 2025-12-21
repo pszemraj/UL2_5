@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "UL2_5"
-version = "0.1.0"
+dynamic = ["version"]
 description = "GPU-optimized UL2.5 data collation for encoder-decoder models"
 readme = "README.md"
 license = "MIT"
@@ -14,7 +14,6 @@ keywords = ["nlp", "transformers", "t5", "ul2", "data-collation", "pytorch"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -41,8 +40,11 @@ all = ["UL2_5[transformers,dev]"]
 Homepage = "https://github.com/pszemraj/UL2_5"
 Repository = "https://github.com/pszemraj/UL2_5"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/UL2_5"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+version_file = "src/UL2_5/_version.py"
 
 [tool.ruff]
 line-length = 88
