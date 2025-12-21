@@ -34,6 +34,7 @@ class UL25DataCollator(DataCollatorMixin):
         max_labels_length: Maximum decoder sequence length
         pad_to_multiple_of: Pad to multiple of this value (for tensor cores)
         return_tensors: Output format ("pt" for PyTorch)
+        return_task_info: If True, include task_indices in output for debugging
 
     Example:
         >>> from transformers import AutoTokenizer
@@ -53,6 +54,7 @@ class UL25DataCollator(DataCollatorMixin):
         max_labels_length: int = 128,
         pad_to_multiple_of: int | None = None,
         return_tensors: str = "pt",
+        return_task_info: bool = False,
     ):
         self.tokenizer = tokenizer
         self.config = config or UL25Config.recommended()
@@ -60,6 +62,7 @@ class UL25DataCollator(DataCollatorMixin):
         self.max_labels_length = max_labels_length
         self.pad_to_multiple_of = pad_to_multiple_of
         self.return_tensors = return_tensors
+        self.return_task_info = return_task_info
 
         # Token IDs
         self.sentinel_start = self._get_sentinel_start()
@@ -306,13 +309,16 @@ class UL25DataCollator(DataCollatorMixin):
 
         return {"encoder_ids": encoder_ids, "decoder_ids": decoder_ids}
 
-    def _pad_length(self, length: int) -> int:
-        """Round up to pad_to_multiple_of if specified."""
+    def _pad_length(self, length: int, cap: int | None = None) -> int:
+        """Round up to pad_to_multiple_of if specified, capped at cap."""
         if self.pad_to_multiple_of is None:
             return length
-        return (
+        padded = (
             (length + self.pad_to_multiple_of - 1) // self.pad_to_multiple_of
         ) * self.pad_to_multiple_of
+        if cap is not None:
+            padded = min(padded, cap)
+        return padded
 
     def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Tensor]:
         """
@@ -361,8 +367,8 @@ class UL25DataCollator(DataCollatorMixin):
         max_dec = min(
             self.max_labels_length, max(p["decoder_ids"].shape[0] for p in processed)
         )
-        max_enc = self._pad_length(max_enc)
-        max_dec = self._pad_length(max_dec)
+        max_enc = self._pad_length(max_enc, self.max_length)
+        max_dec = self._pad_length(max_dec, self.max_labels_length)
 
         batch_size = len(processed)
 
@@ -394,12 +400,19 @@ class UL25DataCollator(DataCollatorMixin):
             if dec_len > 1:
                 decoder_input_ids[i, 1:dec_len] = dec[: dec_len - 1]
 
-        return {
+        result = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
             "decoder_input_ids": decoder_input_ids,
         }
+
+        if self.return_task_info:
+            result["task_indices"] = torch.tensor(
+                denoiser_indices, dtype=torch.long, device=device
+            )
+
+        return result
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, Tensor]:
         """Collate batch of examples."""
