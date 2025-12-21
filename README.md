@@ -1,6 +1,6 @@
 # UL2.5 Data Collator
 
-GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementing and improving the UL2 mixture-of-denoisers training paradigm.
+Training-ready data collation for encoder-decoder models (T5, FLAN, etc.), implementing and improving on the [UL2](https://arxiv.org/abs/2205.05131) mixture-of-denoisers training paradigm.
 
 ## Features
 
@@ -36,7 +36,7 @@ GPU-ready data collation for encoder-decoder models (T5, FLAN, etc.) implementin
 ## Installation
 
 ```bash
-pip install torch>=2.0.0 transformers>=4.30.0 sentencepiece pydantic>=2.0.0
+pip install "git+https://github.com/pszemraj/UL2_5.git"
 ```
 
 Or clone and install in editable mode:
