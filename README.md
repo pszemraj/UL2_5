@@ -10,7 +10,7 @@ Training-ready data collation for encoder-decoder models (T5, FLAN, etc.), imple
 - **HuggingFace compatible**: Works with `Trainer` and `DataLoader`
 - **Curriculum learning**: Gradually shift denoiser mixture during training
 - **Length-adaptive sampling**: Boost long-context tasks for long sequences
-- **Span boundary snapping**: Align span starts to word boundaries (CPU only)
+- **Span boundary snapping**: Optional alignment of span starts to word boundaries (CPU only, off by default)
 - **Two implementations**: HF-integrated (`collator_hf.py`) or pure PyTorch (`collator_torch.py`)
 
 ---
@@ -92,6 +92,7 @@ print(batch["decoder_input_ids"].shape) # [batch_size, max_dec_len]
 | `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2             |
 | `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training           |
 | `UL25Config.flan_ul2_finetune()`           | Same as recommended() but without mode tokens       | Fine-tuning Flan-UL2        |
+| `UL25Config.all_features()`                | recommended() + boundary snapping enabled           | Quality-focused training    |
 
 ## UL2 Mode Token Semantics
 
@@ -298,7 +299,7 @@ UL25Config(
     curriculum_start: List[float],  # Weights at progress=0 (optional)
     curriculum_end: List[float],    # Weights at progress=1 (optional)
     enable_length_adaptive: bool = True,   # Length-adaptive task selection
-    enable_boundary_snapping: bool = True, # Snap span starts to word boundaries (CPU only)
+    enable_boundary_snapping: bool = False, # Snap span starts to word boundaries (CPU only, adds overhead)
 )
 ```
 
@@ -320,8 +321,9 @@ DenoiserSpec(
 
 1. **Use `pad_to_multiple_of=8`** for tensor core alignment
 2. **Pin memory** in DataLoader: `pin_memory=True`
-3. **GPU tensors**: Pass input_ids as CUDA tensors for GPU-side processing (boundary snapping runs on CPU only)
+3. **GPU tensors**: Pass input_ids as CUDA tensors for GPU-side processing
 4. **Batch size**: Larger batches amortize collation overhead
+5. **Boundary snapping**: Disabled by default for performance. Enable with `UL25Config.all_features()` or `enable_boundary_snapping=True` when semantic alignment matters more than throughput
 
 ## Benchmarks
 
