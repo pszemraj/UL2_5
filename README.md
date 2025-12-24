@@ -106,28 +106,7 @@ The UL2 paper defines three mode tokens that signal the denoising objective to t
 
 **UL2.5 Extension**: This library adds `[I]` for infilling (middle-out masking with bidirectional context), which is not in the original UL2 paper.
 
-### When to Add Mode Tokens
-
-```python
-# For UL2-style training with mode tokens
-tokenizer.add_special_tokens({
-    "additional_special_tokens": ["[R]", "[S]", "[X]", "[I]"]
-})
-model.resize_token_embeddings(len(tokenizer))
-```
-
-### When NOT to Use Mode Tokens
-
-For fine-tuning **Flan-UL2**, use `UL25Config.flan_ul2_finetune()` which omits prefixes:
-
-```python
-# Flan-UL2 was trained to "forget" mode tokens
-collator = UL25DataCollator(
-    tokenizer=tokenizer,
-    config=UL25Config.flan_ul2_finetune(),
-    max_length=2048,  # Flan-UL2 supports 2048 context
-)
-```
+> **Note**: Add mode tokens as shown in [Quick Start](#quick-start). For Flan-UL2 fine-tuning, use `UL25Config.flan_ul2_finetune()` which omits prefixes since Flan-UL2 was trained to "forget" them.
 
 ## Context Length Guidance
 
