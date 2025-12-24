@@ -71,7 +71,8 @@ class UL25Config(BaseModel):
         default=True, description="Enable length-adaptive task selection"
     )
     enable_boundary_snapping: bool = Field(
-        default=True, description="Enable span boundary snapping"
+        default=False,
+        description="Enable span boundary snapping (CPU-only, adds overhead)",
     )
 
     model_config = {"frozen": False, "extra": "forbid"}
