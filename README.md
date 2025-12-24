@@ -20,6 +20,8 @@ Training-ready data collation for encoder-decoder models (T5, FLAN, etc.), imple
   - [Installation](#installation)
   - [Quick Start](#quick-start)
   - [Configuration Presets](#configuration-presets)
+  - [UL2 Mode Token Semantics](#ul2-mode-token-semantics)
+  - [Context Length Guidance](#context-length-guidance)
   - [Usage with HuggingFace Trainer](#usage-with-huggingface-trainer)
   - [Usage with DataLoader](#usage-with-dataloader)
   - [Curriculum Learning](#curriculum-learning)
@@ -85,24 +87,24 @@ print(batch["decoder_input_ids"].shape) # [batch_size, max_dec_len]
 
 ## Configuration Presets
 
-| Preset                                     | Description                                         | Use Case                    |
-| ------------------------------------------ | --------------------------------------------------- | --------------------------- |
-| `UL25Config.recommended()`                 | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training        |
-| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy           | Long pre-training runs      |
-| `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2             |
-| `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training           |
-| `UL25Config.flan_ul2_finetune()`           | Same as recommended() but without mode tokens       | Fine-tuning Flan-UL2        |
-| `UL25Config.all_features()`                | recommended() + boundary snapping enabled           | Quality-focused training    |
+| Preset                                     | Description                                         | Use Case                 |
+| ------------------------------------------ | --------------------------------------------------- | ------------------------ |
+| `UL25Config.recommended()`                 | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training     |
+| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy           | Long pre-training runs   |
+| `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2          |
+| `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training        |
+| `UL25Config.flan_ul2_finetune()`           | Same as recommended() but without mode tokens       | Fine-tuning Flan-UL2     |
+| `UL25Config.all_features()`                | recommended() + boundary snapping enabled           | Quality-focused training |
 
 ## UL2 Mode Token Semantics
 
 The UL2 paper defines three mode tokens that signal the denoising objective to the model:
 
-| Token | Name      | Criteria                                | Description                |
-|-------|-----------|----------------------------------------|----------------------------|
-| `[R]` | Regular   | r < 50%, mu < 12                        | Standard span corruption   |
-| `[S]` | Sequential| Prefix LM tasks                         | Causal-like generation     |
-| `[X]` | eXtreme   | r >= 50% OR mu >= 12                    | High corruption or long spans |
+| Token | Name       | Criteria             | Description                   |
+| ----- | ---------- | -------------------- | ----------------------------- |
+| `[R]` | Regular    | r < 50%, mu < 12     | Standard span corruption      |
+| `[S]` | Sequential | Prefix LM tasks      | Causal-like generation        |
+| `[X]` | eXtreme    | r >= 50% OR mu >= 12 | High corruption or long spans |
 
 **UL2.5 Extension**: This library adds `[I]` for infilling (middle-out masking with bidirectional context), which is not in the original UL2 paper.
 
@@ -110,12 +112,12 @@ The UL2 paper defines three mode tokens that signal the denoising objective to t
 
 ## Context Length Guidance
 
-| Checkpoint              | Native Length | Recommended `max_length` |
-|-------------------------|---------------|--------------------------|
-| google/t5-v1_1-*        | 512           | 512                      |
-| google/flan-t5-*        | 512           | 512                      |
-| google/ul2              | 2048          | 2048                     |
-| google/flan-ul2         | 2048          | 2048                     |
+| Checkpoint       | Native Length | Recommended `max_length` |
+| ---------------- | ------------- | ------------------------ |
+| google/t5-v1_1-* | 512           | 512                      |
+| google/flan-t5-* | 512           | 512                      |
+| google/ul2       | 2048          | 2048                     |
+| google/flan-ul2  | 2048          | 2048                     |
 
 ## Usage with HuggingFace Trainer
 
