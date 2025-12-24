@@ -448,6 +448,7 @@ def create_ul25_collator(
         "minimal": UL25Config.minimal,
         "span_heavy": UL25Config.span_heavy,
         "flan_ul2": UL25Config.flan_ul2_finetune,
+        "all_features": UL25Config.all_features,
     }
 
     if preset not in presets:
