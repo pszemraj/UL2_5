@@ -162,10 +162,43 @@ class TestConfigPresets:
         """flan_ul2_finetune() should have no prefixes."""
         config = UL25Config.flan_ul2_finetune()
         for d in config.denoisers:
-            assert d.prefix == "", f"Denoiser should have empty prefix, got '{d.prefix}'"
+            assert d.prefix == "", (
+                f"Denoiser should have empty prefix, got '{d.prefix}'"
+            )
 
     def test_minimal(self):
         """minimal() should be minimal but valid."""
         config = UL25Config.minimal()
         assert len(config.denoisers) == 2
         assert abs(sum(config.weights) - 1.0) < 1e-6
+
+    def test_all_features(self):
+        """all_features() should have boundary snapping enabled."""
+        config = UL25Config.all_features()
+        assert len(config.denoisers) > 0
+        assert abs(sum(config.weights) - 1.0) < 1e-6
+        assert config.enable_boundary_snapping is True
+
+    def test_boundary_snapping_disabled_by_default(self):
+        """Boundary snapping should be disabled by default."""
+        config = UL25Config(
+            denoisers=[DenoiserSpec(task=Task.SPAN)],
+            weights=[1.0],
+        )
+        assert config.enable_boundary_snapping is False
+
+    def test_standard_presets_boundary_snapping_disabled(self):
+        """Standard presets should have boundary snapping disabled."""
+        presets = [
+            UL25Config.recommended(),
+            UL25Config.recommended_with_curriculum(),
+            UL25Config.ul2_original(),
+            UL25Config.t5_standard(),
+            UL25Config.minimal(),
+            UL25Config.span_heavy(),
+            UL25Config.flan_ul2_finetune(),
+        ]
+        for config in presets:
+            assert config.enable_boundary_snapping is False, (
+                "Preset should have boundary snapping disabled"
+            )
