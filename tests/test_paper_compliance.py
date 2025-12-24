@@ -1,7 +1,5 @@
 """Tests for UL2 paper compliance."""
 
-import pytest
-
 from UL2_5 import Task, UL25Config
 
 
@@ -23,9 +21,15 @@ class TestUL2PaperCompliance:
             w for d, w in zip(config.denoisers, config.weights) if d.prefix == "[X]"
         )
 
-        assert abs(r_weight - 0.33) < 0.01, f"R-denoiser weight {r_weight} should be ~33%"
-        assert abs(s_weight - 0.34) < 0.01, f"S-denoiser weight {s_weight} should be ~34%"
-        assert abs(x_weight - 0.33) < 0.01, f"X-denoiser weight {x_weight} should be ~33%"
+        assert abs(r_weight - 0.33) < 0.01, (
+            f"R-denoiser weight {r_weight} should be ~33%"
+        )
+        assert abs(s_weight - 0.34) < 0.01, (
+            f"S-denoiser weight {s_weight} should be ~34%"
+        )
+        assert abs(x_weight - 0.33) < 0.01, (
+            f"X-denoiser weight {x_weight} should be ~33%"
+        )
 
     def test_ul2_original_denoiser_count(self):
         """UL2 paper specifies 7 denoisers."""
@@ -40,8 +44,7 @@ class TestUL2PaperCompliance:
             if d.prefix == "[X]":
                 is_extreme = d.r >= 0.5 or d.mu >= 12
                 assert is_extreme, (
-                    f"[X] denoiser should have r>=50% or mu>=12, "
-                    f"got r={d.r}, mu={d.mu}"
+                    f"[X] denoiser should have r>=50% or mu>=12, got r={d.r}, mu={d.mu}"
                 )
 
     def test_r_denoiser_semantics(self):
@@ -52,8 +55,7 @@ class TestUL2PaperCompliance:
             if d.prefix == "[R]":
                 is_regular = d.r < 0.5 and d.mu < 12
                 assert is_regular, (
-                    f"[R] denoiser should have r<50% and mu<12, "
-                    f"got r={d.r}, mu={d.mu}"
+                    f"[R] denoiser should have r<50% and mu<12, got r={d.r}, mu={d.mu}"
                 )
 
     def test_s_denoiser_is_prefix_lm(self):
@@ -113,14 +115,18 @@ class TestUL25Extensions:
 
         for d in config.denoisers:
             if d.task == Task.INFILLING:
-                assert d.prefix == "[I]", f"Infilling should use [I] prefix, got '{d.prefix}'"
+                assert d.prefix == "[I]", (
+                    f"Infilling should use [I] prefix, got '{d.prefix}'"
+                )
 
     def test_middle_heavy_exists(self):
         """recommended() should include middle-heavy span task."""
         config = UL25Config.recommended()
 
         middle_denoisers = [d for d in config.denoisers if d.task == Task.SPAN_MIDDLE]
-        assert len(middle_denoisers) >= 1, "Should have at least one middle-heavy denoiser"
+        assert len(middle_denoisers) >= 1, (
+            "Should have at least one middle-heavy denoiser"
+        )
 
     def test_flan_ul2_no_prefixes(self):
         """flan_ul2_finetune() should have no mode tokens."""
