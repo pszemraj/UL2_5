@@ -275,3 +275,29 @@ class UL25Config(BaseModel):
             ],
             weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
         )
+
+    @classmethod
+    def all_features(cls) -> UL25Config:
+        """
+        Full-featured config with all optional enhancements enabled.
+
+        Same mixture as recommended() but with boundary snapping enabled.
+        Use when training quality is prioritized over throughput.
+
+        Note: Boundary snapping adds CPU overhead for aligning span starts
+        to word boundaries. Only use when semantic alignment matters more
+        than training speed.
+        """
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+            ],
+            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+            enable_boundary_snapping=True,
+        )
