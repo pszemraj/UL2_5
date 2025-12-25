@@ -1,6 +1,5 @@
 """Tests for masking functions."""
 
-import pytest
 import torch
 
 from UL2_5.masking import (
@@ -105,7 +104,7 @@ class TestMiddleHeavySpanMask:
         for _ in range(n_samples):
             mask = middle_heavy_span_mask(seq_len, 0.3, 3.0, device)
             middle_count += mask[list(middle_range)].sum().item()
-            edge_count += mask[:seq_len // 3].sum().item()
+            edge_count += mask[: seq_len // 3].sum().item()
             edge_count += mask[2 * seq_len // 3 :].sum().item()
 
         # Middle third should have more masks than each edge third
@@ -144,7 +143,9 @@ class TestPrefixLmMask:
             splits.append(split)
 
         avg_split = sum(splits) / len(splits)
-        assert 20 <= avg_split <= 80, f"Average split {avg_split} outside expected range"
+        assert 20 <= avg_split <= 80, (
+            f"Average split {avg_split} outside expected range"
+        )
 
     def test_short_mode(self, device):
         """Short mode should have long prefix (high split)."""

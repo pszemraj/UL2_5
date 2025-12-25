@@ -10,7 +10,7 @@ Training-ready data collation for encoder-decoder models (T5, FLAN, etc.), imple
 - **HuggingFace compatible**: Works with `Trainer` and `DataLoader`
 - **Curriculum learning**: Gradually shift denoiser mixture during training
 - **Length-adaptive sampling**: Boost long-context tasks for long sequences
-- **Span boundary snapping**: Align span starts to word boundaries (CPU only)
+- **Span boundary snapping**: Optional alignment of span starts to word boundaries (CPU only, off by default)
 - **Two implementations**: HF-integrated (`collator_hf.py`) or pure PyTorch (`collator_torch.py`)
 
 ---
@@ -20,6 +20,8 @@ Training-ready data collation for encoder-decoder models (T5, FLAN, etc.), imple
   - [Installation](#installation)
   - [Quick Start](#quick-start)
   - [Configuration Presets](#configuration-presets)
+  - [UL2 Mode Token Semantics](#ul2-mode-token-semantics)
+  - [Context Length Guidance](#context-length-guidance)
   - [Usage with HuggingFace Trainer](#usage-with-huggingface-trainer)
   - [Usage with DataLoader](#usage-with-dataloader)
   - [Curriculum Learning](#curriculum-learning)
@@ -85,57 +87,37 @@ print(batch["decoder_input_ids"].shape) # [batch_size, max_dec_len]
 
 ## Configuration Presets
 
-| Preset                                     | Description                                         | Use Case                    |
-| ------------------------------------------ | --------------------------------------------------- | --------------------------- |
-| `UL25Config.recommended()`                 | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training        |
-| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy           | Long pre-training runs      |
-| `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2             |
-| `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training           |
-| `UL25Config.flan_ul2_finetune()`           | Same as recommended() but without mode tokens       | Fine-tuning Flan-UL2        |
+| Preset                                     | Description                                         | Use Case                 |
+| ------------------------------------------ | --------------------------------------------------- | ------------------------ |
+| `UL25Config.recommended()`                 | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training     |
+| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy           | Long pre-training runs   |
+| `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2          |
+| `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training        |
+| `UL25Config.flan_ul2_finetune()`           | Same as recommended() but without mode tokens       | Fine-tuning Flan-UL2     |
+| `UL25Config.all_features()`                | recommended() + boundary snapping enabled           | Quality-focused training |
 
 ## UL2 Mode Token Semantics
 
 The UL2 paper defines three mode tokens that signal the denoising objective to the model:
 
-| Token | Name      | Criteria                                | Description                |
-|-------|-----------|----------------------------------------|----------------------------|
-| `[R]` | Regular   | r < 50%, mu < 12                        | Standard span corruption   |
-| `[S]` | Sequential| Prefix LM tasks                         | Causal-like generation     |
-| `[X]` | eXtreme   | r >= 50% OR mu >= 12                    | High corruption or long spans |
+| Token | Name       | Criteria             | Description                   |
+| ----- | ---------- | -------------------- | ----------------------------- |
+| `[R]` | Regular    | r < 50%, mu < 12     | Standard span corruption      |
+| `[S]` | Sequential | Prefix LM tasks      | Causal-like generation        |
+| `[X]` | eXtreme    | r >= 50% OR mu >= 12 | High corruption or long spans |
 
 **UL2.5 Extension**: This library adds `[I]` for infilling (middle-out masking with bidirectional context), which is not in the original UL2 paper.
 
-### When to Add Mode Tokens
-
-```python
-# For UL2-style training with mode tokens
-tokenizer.add_special_tokens({
-    "additional_special_tokens": ["[R]", "[S]", "[X]", "[I]"]
-})
-model.resize_token_embeddings(len(tokenizer))
-```
-
-### When NOT to Use Mode Tokens
-
-For fine-tuning **Flan-UL2**, use `UL25Config.flan_ul2_finetune()` which omits prefixes:
-
-```python
-# Flan-UL2 was trained to "forget" mode tokens
-collator = UL25DataCollator(
-    tokenizer=tokenizer,
-    config=UL25Config.flan_ul2_finetune(),
-    max_length=2048,  # Flan-UL2 supports 2048 context
-)
-```
+> **Note**: Add mode tokens as shown in [Quick Start](#quick-start). For Flan-UL2 fine-tuning, use `UL25Config.flan_ul2_finetune()` which omits prefixes since Flan-UL2 was trained to "forget" them.
 
 ## Context Length Guidance
 
-| Checkpoint              | Native Length | Recommended `max_length` |
-|-------------------------|---------------|--------------------------|
-| google/t5-v1_1-*        | 512           | 512                      |
-| google/flan-t5-*        | 512           | 512                      |
-| google/ul2              | 2048          | 2048                     |
-| google/flan-ul2         | 2048          | 2048                     |
+| Checkpoint       | Native Length | Recommended `max_length` |
+| ---------------- | ------------- | ------------------------ |
+| google/t5-v1_1-* | 512           | 512                      |
+| google/flan-t5-* | 512           | 512                      |
+| google/ul2       | 2048          | 2048                     |
+| google/flan-ul2  | 2048          | 2048                     |
 
 ## Usage with HuggingFace Trainer
 
@@ -298,7 +280,7 @@ UL25Config(
     curriculum_start: List[float],  # Weights at progress=0 (optional)
     curriculum_end: List[float],    # Weights at progress=1 (optional)
     enable_length_adaptive: bool = True,   # Length-adaptive task selection
-    enable_boundary_snapping: bool = True, # Snap span starts to word boundaries (CPU only)
+    enable_boundary_snapping: bool = False, # Snap span starts to word boundaries (CPU only, adds overhead)
 )
 ```
 
@@ -320,8 +302,9 @@ DenoiserSpec(
 
 1. **Use `pad_to_multiple_of=8`** for tensor core alignment
 2. **Pin memory** in DataLoader: `pin_memory=True`
-3. **GPU tensors**: Pass input_ids as CUDA tensors for GPU-side processing (boundary snapping runs on CPU only)
+3. **GPU tensors**: Pass input_ids as CUDA tensors for GPU-side processing
 4. **Batch size**: Larger batches amortize collation overhead
+5. **Boundary snapping**: Disabled by default for performance. Enable with `UL25Config.all_features()` or `enable_boundary_snapping=True` when semantic alignment matters more than throughput
 
 ## Benchmarks
 

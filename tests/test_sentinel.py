@@ -67,7 +67,7 @@ class TestCreateSentinelIds:
             sentinel_ids = create_sentinel_ids(mask, 32099, max_sentinels=100)
 
         # Sentinel IDs should not go below 32099 - 100 + 1 = 32000
-        span_starts = (sentinel_ids > 0)
+        span_starts = sentinel_ids > 0
         if span_starts.any():
             min_sentinel = sentinel_ids[span_starts].min().item()
             assert min_sentinel >= 32000, f"Sentinel {min_sentinel} below minimum"
@@ -91,7 +91,9 @@ class TestApplySentinelMask:
     def test_basic_application(self, device):
         """Basic sentinel application."""
         input_ids = torch.tensor([10, 20, 30, 40, 50], dtype=torch.long, device=device)
-        sentinel_ids = torch.tensor([0, 32099, -1, 0, 0], dtype=torch.long, device=device)
+        sentinel_ids = torch.tensor(
+            [0, 32099, -1, 0, 0], dtype=torch.long, device=device
+        )
 
         result = apply_sentinel_mask(input_ids, sentinel_ids)
 

@@ -57,9 +57,9 @@ class TestUL25DataCollator:
         valid_labels = labels[labels != -100]
         if len(valid_labels) > 1:
             n = len(valid_labels)
-            assert torch.equal(
-                decoder_ids[1:n], valid_labels[:-1]
-            ), "decoder_input_ids should be right-shifted labels"
+            assert torch.equal(decoder_ids[1:n], valid_labels[:-1]), (
+                "decoder_input_ids should be right-shifted labels"
+            )
 
     def test_task_info(self, mock_tokenizer):
         """return_task_info should include task_indices."""
