@@ -156,7 +156,7 @@ class TestUL25DataCollator:
             UL25Config.minimal(),
         )
 
-        with pytest.raises(Exception):
+        with pytest.raises((IndexError, ValueError)):
             collator([])
 
 
