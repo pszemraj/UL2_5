@@ -202,3 +202,60 @@ class TestConfigPresets:
             assert config.enable_boundary_snapping is False, (
                 "Preset should have boundary snapping disabled"
             )
+
+    def test_flash_attention_preset(self):
+        """flash_attention() should have unpadding enabled."""
+        config = UL25Config.flash_attention()
+        assert len(config.denoisers) > 0
+        assert abs(sum(config.weights) - 1.0) < 1e-6
+        assert config.enable_unpad_encoder is True
+        assert config.enable_unpad_decoder is True
+
+    def test_unpad_disabled_by_default(self):
+        """Unpadding should be disabled by default."""
+        config = UL25Config(
+            denoisers=[DenoiserSpec(task=Task.SPAN)],
+            weights=[1.0],
+        )
+        assert config.enable_unpad_encoder is False
+        assert config.enable_unpad_decoder is False
+
+    def test_unpad_can_be_enabled_individually(self):
+        """Unpadding can be enabled for encoder only or decoder only."""
+        config_enc = UL25Config(
+            denoisers=[DenoiserSpec(task=Task.SPAN)],
+            weights=[1.0],
+            enable_unpad_encoder=True,
+            enable_unpad_decoder=False,
+        )
+        assert config_enc.enable_unpad_encoder is True
+        assert config_enc.enable_unpad_decoder is False
+
+        config_dec = UL25Config(
+            denoisers=[DenoiserSpec(task=Task.SPAN)],
+            weights=[1.0],
+            enable_unpad_encoder=False,
+            enable_unpad_decoder=True,
+        )
+        assert config_dec.enable_unpad_encoder is False
+        assert config_dec.enable_unpad_decoder is True
+
+    def test_standard_presets_unpad_disabled(self):
+        """Standard presets should have unpadding disabled."""
+        presets = [
+            UL25Config.recommended(),
+            UL25Config.recommended_with_curriculum(),
+            UL25Config.ul2_original(),
+            UL25Config.t5_standard(),
+            UL25Config.minimal(),
+            UL25Config.span_heavy(),
+            UL25Config.flan_ul2_finetune(),
+            UL25Config.all_features(),
+        ]
+        for config in presets:
+            assert config.enable_unpad_encoder is False, (
+                "Standard preset should have unpad_encoder disabled"
+            )
+            assert config.enable_unpad_decoder is False, (
+                "Standard preset should have unpad_decoder disabled"
+            )
