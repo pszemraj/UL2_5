@@ -87,14 +87,15 @@ print(batch["decoder_input_ids"].shape) # [batch_size, max_dec_len]
 
 ## Configuration Presets
 
-| Preset                                     | Description                                         | Use Case                 |
-| ------------------------------------------ | --------------------------------------------------- | ------------------------ |
-| `UL25Config.recommended()`                 | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training     |
-| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy           | Long pre-training runs   |
-| `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2          |
-| `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training        |
-| `UL25Config.flan_ul2_finetune()`           | Same as recommended() but without mode tokens       | Fine-tuning Flan-UL2     |
-| `UL25Config.all_features()`                | recommended() + boundary snapping enabled           | Quality-focused training |
+| Preset                                     | Description                                         | Use Case                    |
+| ------------------------------------------ | --------------------------------------------------- | --------------------------- |
+| `UL25Config.recommended()`                 | Balanced mixture (30% span, 50% prefix, 20% infill) | General pre-training        |
+| `UL25Config.recommended_with_curriculum()` | Starts span-heavy, shifts to prefix-heavy           | Long pre-training runs      |
+| `UL25Config.ul2_original()`                | Original UL2 paper 7-denoiser mixture               | Reproducing UL2             |
+| `UL25Config.t5_standard()`                 | Standard T5 span corruption only                    | T5-style training           |
+| `UL25Config.flan_ul2_finetune()`           | Same as recommended() but without mode tokens       | Fine-tuning Flan-UL2        |
+| `UL25Config.all_features()`                | recommended() + boundary snapping enabled           | Quality-focused training    |
+| `UL25Config.flash_attention()`             | recommended() + unpadding for FA2 varlen kernels    | Flash Attention integration |
 
 ## UL2 Mode Token Semantics
 
@@ -298,6 +299,50 @@ DenoiserSpec(
 )
 ```
 
+## Flash Attention Integration
+
+For models using Flash Attention 2's variable-length kernels (`flash_attn_varlen_*`), enable unpadding to get flat tensors with varlen metadata:
+
+```python
+from UL2_5 import UL25DataCollator, UL25Config
+
+# Use the flash_attention preset
+collator = UL25DataCollator(
+    tokenizer=tokenizer,
+    config=UL25Config.flash_attention(),
+)
+
+# Or enable manually on any config
+config = UL25Config.recommended()
+config.enable_unpad_encoder = True
+config.enable_unpad_decoder = True
+collator = UL25DataCollator(tokenizer, config)
+
+# Collator output includes both padded and unpadded tensors
+batch = collator(examples)
+
+# Standard padded outputs (always present)
+batch["input_ids"]           # (batch, max_enc)
+batch["attention_mask"]      # (batch, max_enc)
+
+# Unpadded encoder outputs
+batch["input_ids_unpad"]     # (total_enc_tokens,)
+batch["encoder_cu_seqlens"]  # (batch + 1,) int32 - for flash_attn_varlen_*
+batch["encoder_max_seqlen"]  # int
+batch["encoder_indices"]     # (total_enc_tokens,) - for pad_input()
+
+# Unpadded decoder outputs (if enable_unpad_decoder=True)
+batch["decoder_input_ids_unpad"]
+batch["labels_unpad"]
+batch["decoder_cu_seqlens"]
+batch["decoder_max_seqlen"]
+batch["decoder_indices"]
+
+# Re-pad utility for model outputs
+from UL2_5 import pad_input
+padded = pad_input(unpadded_hidden, batch["encoder_indices"], batch_size, seqlen)
+```
+
 ## Performance Tips
 
 1. **Use `pad_to_multiple_of=8`** for tensor core alignment
@@ -305,6 +350,7 @@ DenoiserSpec(
 3. **GPU tensors**: Pass input_ids as CUDA tensors for GPU-side processing
 4. **Batch size**: Larger batches amortize collation overhead
 5. **Boundary snapping**: Disabled by default for performance. Enable with `UL25Config.all_features()` or `enable_boundary_snapping=True` when semantic alignment matters more than throughput
+6. **Flash Attention unpadding**: Use `UL25Config.flash_attention()` or `enable_unpad_*=True` to get varlen tensors for Flash Attention 2
 
 ## Benchmarks
 
