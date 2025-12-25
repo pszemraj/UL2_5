@@ -76,6 +76,25 @@ class TestUnpadInput:
         # Row 1: positions 4, 5, 6 (tokens 30, 40, 50)
         assert out.indices.tolist() == [0, 1, 4, 5, 6]
 
+    def test_non_contiguous_3d(self) -> None:
+        """Verify unpadding handles non-contiguous tensors from transpose/permute."""
+        batch, seqlen, hidden = 2, 4, 8
+        # Create non-contiguous tensor via transpose
+        inputs = torch.randn(batch, hidden, seqlen).transpose(
+            1, 2
+        )  # (batch, seqlen, hidden)
+        assert not inputs.is_contiguous(), "Test requires non-contiguous input"
+        mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
+
+        out = unpad_input(inputs, mask)
+
+        assert out.hidden_states.shape == (5, hidden)
+        assert out.max_seqlen == 3
+        # Verify values match expected positions
+        assert torch.allclose(out.hidden_states[0], inputs[0, 0])
+        assert torch.allclose(out.hidden_states[1], inputs[0, 1])
+        assert torch.allclose(out.hidden_states[2], inputs[1, 0])
+
 
 class TestPadInput:
     """Tests for pad_input function."""

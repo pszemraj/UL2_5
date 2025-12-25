@@ -63,9 +63,11 @@ def unpad_input(inputs: Tensor, attention_mask: Tensor) -> UnpadOutput:
         unpadded = inputs.flatten()[indices]
     else:
         # Hidden states: (batch, seqlen, hidden) -> (total_tokens, hidden)
+        # Use reshape instead of view to handle non-contiguous tensors
+        # (e.g., from transpose, permute, or slicing before unpadding)
         batch, seqlen = inputs.shape[:2]
         rest = inputs.shape[2:]
-        unpadded = inputs.view(batch * seqlen, *rest)[indices]
+        unpadded = inputs.reshape(batch * seqlen, *rest)[indices]
 
     return UnpadOutput(
         hidden_states=unpadded,
