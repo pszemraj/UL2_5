@@ -29,6 +29,9 @@ from .masking import (
 # Sentinel processing
 from .sentinel import apply_sentinel_mask, create_sentinel_ids
 
+# Unpadding utilities (for Flash Attention varlen kernels)
+from .unpad import UnpadOutput, pad_input, unpad_input
+
 # Default to HF collator (most common use case)
 try:
     from .collator_hf import UL25DataCollator, create_ul25_collator
@@ -61,4 +64,8 @@ __all__ = [
     # Sentinel
     "create_sentinel_ids",
     "apply_sentinel_mask",
+    # Unpadding
+    "unpad_input",
+    "pad_input",
+    "UnpadOutput",
 ]
