@@ -11,6 +11,7 @@ Training-ready data collation for encoder-decoder models (T5, FLAN, etc.), imple
 - **Curriculum learning**: Gradually shift denoiser mixture during training
 - **Length-adaptive sampling**: Boost long-context tasks for long sequences
 - **Span boundary snapping**: Optional alignment of span starts to word boundaries (CPU only, off by default)
+- **Flash Attention support**: Optional unpadding for FA2 varlen kernels with `cu_seqlens` metadata
 - **Two implementations**: HF-integrated (`collator_hf.py`) or pure PyTorch (`collator_torch.py`)
 
 ---
@@ -28,6 +29,7 @@ Training-ready data collation for encoder-decoder models (T5, FLAN, etc.), imple
   - [Custom Configuration](#custom-configuration)
   - [Denoising Tasks](#denoising-tasks)
   - [API Reference](#api-reference)
+  - [Flash Attention Integration](#flash-attention-integration)
   - [Performance Tips](#performance-tips)
   - [Benchmarks](#benchmarks)
   - [Visualizations](#visualizations)
@@ -280,8 +282,10 @@ UL25Config(
     weights: List[float],           # Sampling probabilities (required, sum to 1)
     curriculum_start: List[float],  # Weights at progress=0 (optional)
     curriculum_end: List[float],    # Weights at progress=1 (optional)
-    enable_length_adaptive: bool = True,   # Length-adaptive task selection
-    enable_boundary_snapping: bool = False, # Snap span starts to word boundaries (CPU only, adds overhead)
+    enable_length_adaptive: bool = True,    # Length-adaptive task selection
+    enable_boundary_snapping: bool = False, # Snap span starts to word boundaries (CPU only)
+    enable_unpad_encoder: bool = False,     # Return unpadded encoder tensors for Flash Attention
+    enable_unpad_decoder: bool = False,     # Return unpadded decoder tensors for Flash Attention
 )
 ```
 
