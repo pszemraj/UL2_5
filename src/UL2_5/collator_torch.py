@@ -401,6 +401,30 @@ class UL25DataCollator:
             "decoder_input_ids": decoder_input_ids,
         }
 
+        # Add unpadded outputs if configured (for Flash Attention varlen kernels)
+        if getattr(self.config, "enable_unpad_encoder", False):
+            from .unpad import unpad_input
+
+            enc_unpad = unpad_input(input_ids, attention_mask)
+            result["input_ids_unpad"] = enc_unpad.hidden_states
+            result["encoder_indices"] = enc_unpad.indices
+            result["encoder_cu_seqlens"] = enc_unpad.cu_seqlens
+            result["encoder_max_seqlen"] = enc_unpad.max_seqlen
+
+        if getattr(self.config, "enable_unpad_decoder", False):
+            from .unpad import unpad_input
+
+            # Create decoder attention mask from labels (non -100 positions are valid)
+            decoder_attention_mask = (labels != -100).long()
+            dec_unpad = unpad_input(decoder_input_ids, decoder_attention_mask)
+            labels_unpad = unpad_input(labels, decoder_attention_mask)
+
+            result["decoder_input_ids_unpad"] = dec_unpad.hidden_states
+            result["labels_unpad"] = labels_unpad.hidden_states
+            result["decoder_indices"] = dec_unpad.indices
+            result["decoder_cu_seqlens"] = dec_unpad.cu_seqlens
+            result["decoder_max_seqlen"] = dec_unpad.max_seqlen
+
         if self.return_task_info:
             result["task_indices"] = torch.tensor(
                 denoiser_indices, dtype=torch.long, device=device
