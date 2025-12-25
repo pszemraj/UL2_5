@@ -173,6 +173,94 @@ class TestUnpadDevice:
         assert out.cu_seqlens.device.type == "cuda"
 
 
+class TestUnpadEdgeCases:
+    """Edge case tests for encoder-decoder training dynamics."""
+
+    def test_empty_sequence_in_batch(self) -> None:
+        """Verify handling when one sequence is all padding."""
+        inputs = torch.tensor([[1, 2, 3], [4, 5, 6]])
+        mask = torch.tensor([[1, 1, 1], [0, 0, 0]])  # Second seq is all padding
+
+        out = unpad_input(inputs, mask)
+
+        # Only first sequence's tokens
+        assert out.hidden_states.tolist() == [1, 2, 3]
+        # cu_seqlens has repeat for empty sequence
+        assert out.cu_seqlens.tolist() == [0, 3, 3]
+        assert out.max_seqlen == 3
+
+    def test_4d_multi_head_tensors(self) -> None:
+        """Verify handling of 4D tensors (batch, seqlen, heads, dim)."""
+        batch, seqlen, heads, dim = 2, 4, 8, 64
+        inputs = torch.randn(batch, seqlen, heads, dim)
+        mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
+
+        out = unpad_input(inputs, mask)
+
+        assert out.hidden_states.shape == (5, heads, dim)
+        # Verify values
+        assert torch.allclose(out.hidden_states[0], inputs[0, 0])
+        assert torch.allclose(out.hidden_states[4], inputs[1, 2])
+
+    def test_4d_roundtrip(self) -> None:
+        """Verify roundtrip for 4D tensors preserves values."""
+        batch, seqlen, heads, dim = 2, 4, 8, 64
+        original = torch.randn(batch, seqlen, heads, dim)
+        mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
+
+        out = unpad_input(original, mask)
+        recovered = pad_input(out.hidden_states, out.indices, batch, seqlen)
+
+        assert recovered.shape == original.shape
+        assert torch.allclose(recovered[0, :2], original[0, :2])
+        assert torch.allclose(recovered[1, :3], original[1, :3])
+
+    def test_boolean_mask(self) -> None:
+        """Verify handling of boolean attention masks."""
+        inputs = torch.tensor([[1, 2, 3], [4, 5, 6]])
+        mask = torch.tensor([[True, True, False], [True, True, True]])
+
+        out = unpad_input(inputs, mask)
+
+        assert out.hidden_states.tolist() == [1, 2, 4, 5, 6]
+
+    def test_non_contiguous_2d(self) -> None:
+        """Verify unpadding handles non-contiguous 2D tensors."""
+        # Create non-contiguous via transpose
+        inputs = torch.arange(8).reshape(4, 2).T  # (2, 4) non-contiguous
+        assert not inputs.is_contiguous()
+        mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
+
+        out = unpad_input(inputs, mask)
+
+        assert out.hidden_states.shape == (5,)
+        # Values should match the non-contiguous layout
+        assert out.hidden_states[0] == inputs[0, 0]
+        assert out.hidden_states[1] == inputs[0, 1]
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_device_consistency(self) -> None:
+        """Verify all outputs are on same device as inputs, even with cross-device mask."""
+        inputs = torch.tensor([[1, 2, 3]], device="cuda")
+        mask = torch.tensor([[1, 1, 0]], device="cpu")
+
+        out = unpad_input(inputs, mask)
+
+        # All outputs should be on inputs' device
+        assert out.hidden_states.device.type == "cuda"
+        assert out.indices.device.type == "cuda"
+        assert out.cu_seqlens.device.type == "cuda"
+
+    def test_bfloat16_dtype(self) -> None:
+        """Verify bfloat16 is preserved (common in modern training)."""
+        inputs = torch.randn(2, 4, 8, dtype=torch.bfloat16)
+        mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
+
+        out = unpad_input(inputs, mask)
+
+        assert out.hidden_states.dtype == torch.bfloat16
+
+
 class TestUnpadDtype:
     """Dtype handling tests for unpadding functions."""
 

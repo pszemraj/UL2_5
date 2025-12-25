@@ -48,14 +48,19 @@ def unpad_input(inputs: Tensor, attention_mask: Tensor) -> UnpadOutput:
     # Compute sequence lengths from attention mask
     seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
 
-    # Find indices of non-padding positions
-    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+    # Find indices of non-padding positions and move to input's device
+    # (handles edge case where mask is on different device than inputs)
+    indices = (
+        torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten().to(device)
+    )
 
     # Max sequence length in batch
     max_seqlen = int(seqlens.max().item())
 
     # Cumulative sequence lengths (prepend 0) - int32 for Flash Attention
-    cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+    cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)).to(
+        device
+    )
 
     # Extract non-padding tokens
     if inputs.dim() == 2:
@@ -72,7 +77,7 @@ def unpad_input(inputs: Tensor, attention_mask: Tensor) -> UnpadOutput:
     return UnpadOutput(
         hidden_states=unpadded,
         indices=indices,
-        cu_seqlens=cu_seqlens.to(device),
+        cu_seqlens=cu_seqlens,
         max_seqlen=max_seqlen,
     )
 
