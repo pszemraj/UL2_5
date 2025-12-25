@@ -57,6 +57,8 @@ class UL25Config(BaseModel):
         curriculum_end: Optional ending weights for curriculum
         enable_length_adaptive: Enable length-adaptive task selection
         enable_boundary_snapping: Enable span boundary snapping
+        enable_unpad_encoder: Return unpadded encoder tensors with varlen metadata
+        enable_unpad_decoder: Return unpadded decoder tensors with varlen metadata
     """
 
     denoisers: list[DenoiserSpec] = Field(default_factory=list)
@@ -73,6 +75,14 @@ class UL25Config(BaseModel):
     enable_boundary_snapping: bool = Field(
         default=False,
         description="Enable span boundary snapping (CPU-only, adds overhead)",
+    )
+    enable_unpad_encoder: bool = Field(
+        default=False,
+        description="Return unpadded encoder tensors with varlen metadata for Flash Attention",
+    )
+    enable_unpad_decoder: bool = Field(
+        default=False,
+        description="Return unpadded decoder tensors with varlen metadata for Flash Attention",
     )
 
     model_config = {"frozen": False, "extra": "forbid"}
@@ -300,4 +310,35 @@ class UL25Config(BaseModel):
             ],
             weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
             enable_boundary_snapping=True,
+        )
+
+    @classmethod
+    def flash_attention(cls) -> UL25Config:
+        """
+        Configuration optimized for Flash Attention varlen kernels.
+
+        Same mixture as recommended() but with unpadding enabled for both
+        encoder and decoder. Use with FlashAttention2's varlen APIs.
+
+        Output batch will include:
+        - Standard padded tensors (input_ids, attention_mask, labels, decoder_input_ids)
+        - Unpadded encoder: input_ids_unpad, encoder_indices, encoder_cu_seqlens, encoder_max_seqlen
+        - Unpadded decoder: decoder_input_ids_unpad, labels_unpad, decoder_indices,
+          decoder_cu_seqlens, decoder_max_seqlen
+
+        Note: cu_seqlens tensors use int32 dtype as required by Flash Attention CUDA kernels.
+        """
+        return cls(
+            denoisers=[
+                DenoiserSpec(task=Task.SPAN, mu=3.0, r=0.15, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN, mu=8.0, r=0.25, prefix="[R]"),
+                DenoiserSpec(task=Task.SPAN_MIDDLE, mu=12.0, r=0.20, prefix="[X]"),
+                DenoiserSpec(task=Task.PREFIX_RANDOM, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_SHORT, prefix="[S]"),
+                DenoiserSpec(task=Task.PREFIX_LONG, prefix="[S]"),
+                DenoiserSpec(task=Task.INFILLING, r=0.30, prefix="[I]"),
+            ],
+            weights=[0.10, 0.10, 0.10, 0.20, 0.15, 0.15, 0.20],
+            enable_unpad_encoder=True,
+            enable_unpad_decoder=True,
         )
