@@ -197,8 +197,8 @@ class TestCollatorWithRealTokenizer:
 class TestUnpadCollator:
     """Tests for unpadding feature in collator."""
 
-    def test_encoder_unpad(self, mock_tokenizer):
-        """enable_unpad_encoder should add encoder unpad outputs."""
+    def test_encoder_unpad(self, mock_tokenizer) -> None:
+        """Verify enable_unpad_encoder adds encoder unpad outputs to batch."""
         config = UL25Config.minimal()
         config.enable_unpad_encoder = True
 
@@ -230,8 +230,8 @@ class TestUnpadCollator:
         assert batch["input_ids_unpad"].shape[0] == total_tokens
         assert batch["encoder_cu_seqlens"].shape[0] == 3  # batch_size + 1
 
-    def test_decoder_unpad(self, mock_tokenizer):
-        """enable_unpad_decoder should add decoder unpad outputs."""
+    def test_decoder_unpad(self, mock_tokenizer) -> None:
+        """Verify enable_unpad_decoder adds decoder unpad outputs to batch."""
         config = UL25Config.minimal()
         config.enable_unpad_decoder = True
 
@@ -255,8 +255,8 @@ class TestUnpadCollator:
         assert "decoder_cu_seqlens" in batch
         assert "decoder_max_seqlen" in batch
 
-    def test_both_unpad(self, mock_tokenizer):
-        """Both encoder and decoder unpadding."""
+    def test_both_unpad(self, mock_tokenizer) -> None:
+        """Verify both encoder and decoder unpadding can be enabled together."""
         config = UL25Config.minimal()
         config.enable_unpad_encoder = True
         config.enable_unpad_decoder = True
@@ -269,8 +269,8 @@ class TestUnpadCollator:
         assert "input_ids_unpad" in batch
         assert "decoder_input_ids_unpad" in batch
 
-    def test_unpad_disabled_by_default(self, mock_tokenizer):
-        """Unpadding should be disabled by default."""
+    def test_unpad_disabled_by_default(self, mock_tokenizer) -> None:
+        """Verify unpadding is disabled by default for backward compatibility."""
         collator = UL25DataCollator(mock_tokenizer, UL25Config.minimal())
         examples = [{"input_ids": torch.randint(100, 1000, (50,))}]
 
@@ -279,8 +279,8 @@ class TestUnpadCollator:
         assert "input_ids_unpad" not in batch
         assert "decoder_input_ids_unpad" not in batch
 
-    def test_flash_attention_preset(self, mock_tokenizer):
-        """flash_attention preset should have unpadding enabled."""
+    def test_flash_attention_preset(self, mock_tokenizer) -> None:
+        """Verify flash_attention preset has unpadding enabled for both encoder/decoder."""
         config = UL25Config.flash_attention()
 
         assert config.enable_unpad_encoder is True
@@ -294,8 +294,8 @@ class TestUnpadCollator:
         assert "input_ids_unpad" in batch
         assert "decoder_input_ids_unpad" in batch
 
-    def test_cu_seqlens_dtype(self, mock_tokenizer):
-        """cu_seqlens must be int32 for Flash Attention kernels."""
+    def test_cu_seqlens_dtype(self, mock_tokenizer) -> None:
+        """Verify cu_seqlens tensors are int32 for Flash Attention compatibility."""
         config = UL25Config.minimal()
         config.enable_unpad_encoder = True
         config.enable_unpad_decoder = True
@@ -308,8 +308,8 @@ class TestUnpadCollator:
         assert batch["encoder_cu_seqlens"].dtype == torch.int32
         assert batch["decoder_cu_seqlens"].dtype == torch.int32
 
-    def test_unpad_roundtrip(self, mock_tokenizer):
-        """Unpadded tensors should reconstruct original when re-padded."""
+    def test_unpad_roundtrip(self, mock_tokenizer) -> None:
+        """Verify unpadded tensors reconstruct original when re-padded with pad_input."""
         from UL2_5 import pad_input
 
         config = UL25Config.minimal()

@@ -13,13 +13,12 @@ from torch import Tensor
 class UnpadOutput:
     """Container for unpadded tensor with varlen metadata.
 
-    Attributes:
-        hidden_states: Flattened non-padding tokens (total_tokens,) for IDs
-            or (total_tokens, hidden_dim) for embeddings/hidden states.
-        indices: Position of each token in the original flattened batch (total_tokens,).
-        cu_seqlens: Cumulative sequence lengths, starting with 0 (batch_size + 1,).
-            Uses int32 dtype as required by Flash Attention CUDA kernels.
-        max_seqlen: Maximum sequence length in the batch.
+    :param Tensor hidden_states: Flattened non-padding tokens, shape (total_tokens,)
+        for IDs or (total_tokens, hidden_dim) for embeddings/hidden states.
+    :param Tensor indices: Position of each token in original flattened batch (total_tokens,).
+    :param Tensor cu_seqlens: Cumulative sequence lengths starting with 0 (batch_size + 1,),
+        uses int32 dtype as required by Flash Attention CUDA kernels.
+    :param int max_seqlen: Maximum sequence length in the batch.
     """
 
     hidden_states: Tensor
@@ -28,23 +27,16 @@ class UnpadOutput:
     max_seqlen: int
 
 
-def unpad_input(
-    inputs: Tensor,
-    attention_mask: Tensor,
-) -> UnpadOutput:
-    """
-    Remove padding from batched inputs.
+def unpad_input(inputs: Tensor, attention_mask: Tensor) -> UnpadOutput:
+    """Remove padding from batched inputs for Flash Attention varlen kernels.
 
-    Args:
-        inputs: Padded input tensor (batch, seqlen) or (batch, seqlen, hidden_dim).
-        attention_mask: Binary mask where 1 = valid token, 0 = padding (batch, seqlen).
+    :param Tensor inputs: Padded input tensor, shape (batch, seqlen) or (batch, seqlen, hidden_dim).
+    :param Tensor attention_mask: Binary mask where 1 = valid token, 0 = padding (batch, seqlen).
+    :return UnpadOutput: Container with flattened non-padding tokens and varlen metadata.
 
-    Returns:
-        UnpadOutput containing flattened non-padding tokens and metadata for
-        Flash Attention varlen kernels.
+    Example::
 
-    Example:
-        >>> inputs = torch.tensor([[1, 2, 0, 0], [3, 4, 5, 0]])  # batch=2, seqlen=4
+        >>> inputs = torch.tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
         >>> mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
         >>> out = unpad_input(inputs, mask)
         >>> out.hidden_states  # tensor([1, 2, 3, 4, 5])
@@ -90,20 +82,18 @@ def pad_input(
     seqlen: int,
     pad_value: int | float = 0,
 ) -> Tensor:
-    """
-    Re-pad unpadded inputs to original batch shape.
+    """Re-pad unpadded inputs to original batch shape.
 
-    Args:
-        inputs: Unpadded tensor (total_tokens,) or (total_tokens, hidden_dim).
-        indices: Original positions from unpad_input.
-        batch_size: Original batch size.
-        seqlen: Original sequence length.
-        pad_value: Value for padding positions (default 0).
+    :param Tensor inputs: Unpadded tensor, shape (total_tokens,) or (total_tokens, hidden_dim).
+    :param Tensor indices: Original positions from unpad_input output.
+    :param int batch_size: Original batch size.
+    :param int seqlen: Original sequence length.
+    :param pad_value: Value for padding positions, defaults to 0.
+    :type pad_value: int | float
+    :return Tensor: Padded tensor, shape (batch, seqlen) or (batch, seqlen, hidden_dim).
 
-    Returns:
-        Padded tensor (batch, seqlen) or (batch, seqlen, hidden_dim).
+    Example::
 
-    Example:
         >>> unpadded = torch.tensor([1, 2, 3, 4, 5])
         >>> indices = torch.tensor([0, 1, 4, 5, 6])
         >>> padded = pad_input(unpadded, indices, batch_size=2, seqlen=4)

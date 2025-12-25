@@ -203,16 +203,16 @@ class TestConfigPresets:
                 "Preset should have boundary snapping disabled"
             )
 
-    def test_flash_attention_preset(self):
-        """flash_attention() should have unpadding enabled."""
+    def test_flash_attention_preset(self) -> None:
+        """Verify flash_attention() preset has unpadding enabled for both encoder/decoder."""
         config = UL25Config.flash_attention()
         assert len(config.denoisers) > 0
         assert abs(sum(config.weights) - 1.0) < 1e-6
         assert config.enable_unpad_encoder is True
         assert config.enable_unpad_decoder is True
 
-    def test_unpad_disabled_by_default(self):
-        """Unpadding should be disabled by default."""
+    def test_unpad_disabled_by_default(self) -> None:
+        """Verify unpadding is disabled by default for backward compatibility."""
         config = UL25Config(
             denoisers=[DenoiserSpec(task=Task.SPAN)],
             weights=[1.0],
@@ -220,8 +220,8 @@ class TestConfigPresets:
         assert config.enable_unpad_encoder is False
         assert config.enable_unpad_decoder is False
 
-    def test_unpad_can_be_enabled_individually(self):
-        """Unpadding can be enabled for encoder only or decoder only."""
+    def test_unpad_can_be_enabled_individually(self) -> None:
+        """Verify unpadding can be enabled independently for encoder or decoder."""
         config_enc = UL25Config(
             denoisers=[DenoiserSpec(task=Task.SPAN)],
             weights=[1.0],
@@ -240,8 +240,8 @@ class TestConfigPresets:
         assert config_dec.enable_unpad_encoder is False
         assert config_dec.enable_unpad_decoder is True
 
-    def test_standard_presets_unpad_disabled(self):
-        """Standard presets should have unpadding disabled."""
+    def test_standard_presets_unpad_disabled(self) -> None:
+        """Verify standard presets have unpadding disabled for backward compatibility."""
         presets = [
             UL25Config.recommended(),
             UL25Config.recommended_with_curriculum(),
