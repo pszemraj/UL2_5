@@ -135,3 +135,35 @@ class TestApplySentinelMask:
         # Should be just [32099] (continuations filtered)
         assert len(result) == 1
         assert result[0] == 32099
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_cross_device_sentinel_ids(self):
+        """Verify sentinel_ids on different device than input_ids is handled."""
+        input_ids = torch.tensor([10, 20, 30, 40, 50], dtype=torch.long, device="cuda")
+        # sentinel_ids intentionally on CPU to test cross-device handling
+        sentinel_ids = torch.tensor(
+            [0, 32099, -1, 0, 0], dtype=torch.long, device="cpu"
+        )
+
+        result = apply_sentinel_mask(input_ids, sentinel_ids)
+
+        # Result should be on input_ids device (cuda)
+        assert result.device.type == "cuda"
+        # Should be: [10, 32099, 40, 50]
+        expected = torch.tensor([10, 32099, 40, 50], dtype=torch.long, device="cuda")
+        assert torch.equal(result, expected)
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_cross_device_prefix_ids(self):
+        """Verify prefix_ids on different device than input_ids is handled."""
+        input_ids = torch.tensor([10, 20, 30], dtype=torch.long, device="cuda")
+        sentinel_ids = torch.tensor([32099, -1, 0], dtype=torch.long, device="cuda")
+        # prefix_ids intentionally on CPU
+        prefix_ids = torch.tensor([100, 101], dtype=torch.long, device="cpu")
+
+        result = apply_sentinel_mask(input_ids, sentinel_ids, prefix_ids=prefix_ids)
+
+        # Result should be on input_ids device (cuda)
+        assert result.device.type == "cuda"
+        assert result[0] == 100
+        assert result[1] == 101
