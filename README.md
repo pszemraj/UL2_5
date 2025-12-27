@@ -188,6 +188,9 @@ for epoch in range(num_epochs):
 
 ## Custom Configuration
 
+<details>
+<summary>Building a custom denoiser mixture</summary>
+
 ```python
 from UL2_5 import UL25Config, DenoiserSpec, Task
 
@@ -219,7 +222,12 @@ config = UL25Config(
 collator = UL25DataCollator(tokenizer, config)
 ```
 
+</details>
+
 ## Denoising Tasks
+
+<details>
+<summary>Task types: SPAN, SPAN_MIDDLE, PREFIX_*, INFILLING</summary>
 
 ### Span Corruption (`Task.SPAN`)
 
@@ -233,10 +241,7 @@ Target: <extra_id_0> brown fox <extra_id_1> over the lazy
 
 ### Middle-Heavy Span (`Task.SPAN_MIDDLE`)
 
-Position-biased span corruption that samples span starts with Gaussian weighting
-to prefer the middle of the sequence. Produces contiguous spans.
-When `enable_boundary_snapping` is enabled, span starts are aligned to word
-boundaries for CPU inputs.
+Position-biased span corruption that samples span starts with Gaussian weighting to prefer the middle of the sequence. Produces contiguous spans. When `enable_boundary_snapping` is enabled, span starts are aligned to word boundaries for CPU inputs.
 
 ### Prefix LM (`Task.PREFIX_RANDOM/SHORT/LONG`)
 
@@ -250,7 +255,12 @@ Split sequence into prefix (encoder) and suffix (decoder target).
 
 Mask a contiguous middle chunk, provide bidirectional context.
 
+</details>
+
 ## API Reference
+
+<details>
+<summary>UL25DataCollator, UL25Config, DenoiserSpec signatures</summary>
 
 ### `UL25DataCollator`
 
@@ -266,13 +276,9 @@ UL25DataCollator(
 )
 ```
 
-**Properties:**
+**Properties:** `progress` (float 0.0-1.0 for curriculum learning)
 
-- `progress`: Float 0.0-1.0 for curriculum learning
-
-**Returns:** `{"input_ids", "attention_mask", "labels", "decoder_input_ids"}`
-
-When `return_task_info=True`, also includes `"task_indices"` tensor showing which denoiser was applied to each example.
+**Returns:** `{"input_ids", "attention_mask", "labels", "decoder_input_ids"}` (+ `"task_indices"` when `return_task_info=True`)
 
 ### `UL25Config`
 
@@ -303,9 +309,14 @@ DenoiserSpec(
 )
 ```
 
+</details>
+
 ## Flash Attention Integration
 
-For models using Flash Attention 2's variable-length kernels (`flash_attn_varlen_*`), enable unpadding to get flat tensors with varlen metadata:
+Use `UL25Config.flash_attention()` or enable `enable_unpad_encoder`/`enable_unpad_decoder` for FA2 varlen kernels.
+
+<details>
+<summary>Unpadding setup and output tensors</summary>
 
 ```python
 from UL2_5 import UL25DataCollator, UL25Config
@@ -347,6 +358,8 @@ from UL2_5 import pad_input
 padded = pad_input(unpadded_hidden, batch["encoder_indices"], batch_size, seqlen)
 ```
 
+</details>
+
 ## Performance Tips
 
 1. **Use `pad_to_multiple_of=8`** for tensor core alignment
@@ -373,6 +386,9 @@ Sample output (RTX 4070 Laptop):
 | t5_standard  | 32    | 512    | ~240k    |
 
 ## Visualizations
+
+<details>
+<summary>Mask distributions, examples, and benchmark plots</summary>
 
 ### Mask Distributions
 
@@ -413,6 +429,8 @@ Runtime comparison of masking functions across sequence lengths (log scale):
 ### Additional Visualizations
 
 - [Boundary Snapping Comparison](assets/boundary_snapping_comparison.png) - Before/after visualization of span boundary snapping to word-initial tokens
+
+</details>
 
 ---
 
