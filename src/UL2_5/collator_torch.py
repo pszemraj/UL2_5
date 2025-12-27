@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import warnings
 from typing import Any
 
@@ -238,7 +239,7 @@ class UL25DataCollator:
         """Sample corruption rate."""
         if spec.variable_r:
             lo, hi = spec.r_bounds
-            return lo + (hi - lo) * torch.rand(1).item()
+            return lo + (hi - lo) * random.random()
         return spec.r
 
     def _generate_mask(
@@ -281,7 +282,7 @@ class UL25DataCollator:
         mask = self._generate_mask(seq_len, spec, device)
 
         # Apply boundary snapping if enabled and tokenizer supports it
-        if getattr(self.config, "enable_boundary_snapping", True) and spec.task in (
+        if getattr(self.config, "enable_boundary_snapping", False) and spec.task in (
             Task.SPAN,
             Task.SPAN_MIDDLE,
         ):
@@ -340,7 +341,10 @@ class UL25DataCollator:
                 seq_lens.append(len(ids))
 
         # Sample denoiser indices per example (length-adaptive weights per sequence)
+        # Ensure weights on CPU for efficient .tolist()
         weights = self._get_length_adaptive_weights_batch(seq_lens)
+        if weights.device.type != "cpu":
+            weights = weights.cpu()
         denoiser_indices = torch.multinomial(weights, 1).squeeze(-1).tolist()
 
         # Process examples

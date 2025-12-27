@@ -56,15 +56,15 @@ class TestCreateSentinelIds:
         assert sentinel_ids[7] == -1  # continuation
 
     def test_overflow_protection(self, device):
-        """More spans than sentinels should be clamped with warning."""
+        """More spans than sentinels should be silently clamped."""
         # Create mask with many single-token spans (150 spans)
         mask_list = []
         for _ in range(150):
             mask_list.extend([True, False])
         mask = torch.tensor(mask_list[:300], dtype=torch.bool, device=device)
 
-        with pytest.warns(UserWarning, match="Clamping"):
-            sentinel_ids = create_sentinel_ids(mask, 32099, max_sentinels=100)
+        # Clamping now happens silently (no GPU sync for overflow check)
+        sentinel_ids = create_sentinel_ids(mask, 32099, max_sentinels=100)
 
         # Sentinel IDs should not go below 32099 - 100 + 1 = 32000
         span_starts = sentinel_ids > 0

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
-
 import torch
 from torch import Tensor
 
@@ -38,15 +36,8 @@ def create_sentinel_ids(
 
     cumsum = torch.cumsum(span_starts.int(), dim=0)
 
-    # Check for overflow: if more spans than sentinels, clamp with warning
-    max_span_id = cumsum.max().item() if cumsum.numel() > 0 else 0
-    if max_span_id > max_sentinels:
-        warnings.warn(
-            f"Clamping {max_span_id} spans to {max_sentinels} available sentinels. "
-            f"Consider reducing noise_density or max_spans in DenoiserSpec.",
-            stacklevel=2,
-        )
-        cumsum = torch.clamp(cumsum, max=max_sentinels)
+    # Clamp to max sentinels (no-op when under limit, avoids GPU sync)
+    cumsum = torch.clamp(cumsum, max=max_sentinels)
 
     sentinel_ids = torch.where(
         span_starts, sentinel_start - cumsum + 1, torch.zeros_like(cumsum)
