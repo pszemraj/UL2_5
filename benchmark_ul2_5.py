@@ -356,6 +356,95 @@ def benchmark_cpu_vs_gpu():
 # =============================================================================
 
 
+def test_unpad_outputs(device: torch.device):
+    """Test Flash Attention unpadding outputs."""
+    print("\n" + "=" * 60)
+    print("UNPAD OUTPUTS TEST")
+    print("=" * 60)
+
+    class MockTokenizer:
+        eos_token_id = 1
+        pad_token_id = 0
+        all_special_tokens = [f"<extra_id_{i}>" for i in range(100)]
+        all_special_ids = list(range(32000, 32100))
+
+        def encode(self, text, add_special_tokens=False):
+            return [ord(c) for c in text[:10]]
+
+    tokenizer = MockTokenizer()
+    config = UL25Config.flash_attention()  # Enables both encoder and decoder unpadding
+
+    collator = UL25DataCollator(tokenizer, config, max_length=128, max_labels_length=64)
+
+    # Create batch with varying sequence lengths to test unpadding
+    seq_lens = [32, 48, 64, 24]
+    examples = [
+        {"input_ids": torch.randint(100, 1000, (sl,), device=device)} for sl in seq_lens
+    ]
+
+    batch = collator(examples)
+
+    # Verify standard outputs exist
+    assert "input_ids" in batch
+    assert "attention_mask" in batch
+    assert "labels" in batch
+    assert "decoder_input_ids" in batch
+    print(f"  Standard outputs: input_ids={batch['input_ids'].shape}")
+
+    # Verify encoder unpad outputs
+    assert "input_ids_unpad" in batch, "Missing input_ids_unpad"
+    assert "encoder_indices" in batch, "Missing encoder_indices"
+    assert "encoder_cu_seqlens" in batch, "Missing encoder_cu_seqlens"
+    assert "encoder_max_seqlen" in batch, "Missing encoder_max_seqlen"
+
+    enc_unpad = batch["input_ids_unpad"]
+    enc_cu = batch["encoder_cu_seqlens"]
+    enc_max = batch["encoder_max_seqlen"]
+
+    print(
+        f"  Encoder unpad: {enc_unpad.shape}, cu_seqlens={enc_cu.shape}, max_seqlen={enc_max}"
+    )
+
+    # Validate cu_seqlens structure
+    assert enc_cu[0] == 0, "cu_seqlens should start with 0"
+    assert len(enc_cu) == len(examples) + 1, (
+        "cu_seqlens should have batch_size+1 elements"
+    )
+    assert enc_cu.dtype == torch.int32, "cu_seqlens should be int32 for Flash Attention"
+
+    # Verify total tokens matches
+    total_enc_tokens = batch["attention_mask"].sum().item()
+    assert enc_unpad.shape[0] == total_enc_tokens, (
+        f"Unpadded tokens {enc_unpad.shape[0]} != attention_mask sum {total_enc_tokens}"
+    )
+
+    # Verify decoder unpad outputs
+    assert "decoder_input_ids_unpad" in batch, "Missing decoder_input_ids_unpad"
+    assert "labels_unpad" in batch, "Missing labels_unpad"
+    assert "decoder_cu_seqlens" in batch, "Missing decoder_cu_seqlens"
+    assert "decoder_max_seqlen" in batch, "Missing decoder_max_seqlen"
+
+    dec_unpad = batch["decoder_input_ids_unpad"]
+    dec_cu = batch["decoder_cu_seqlens"]
+    dec_max = batch["decoder_max_seqlen"]
+
+    print(
+        f"  Decoder unpad: {dec_unpad.shape}, cu_seqlens={dec_cu.shape}, max_seqlen={dec_max}"
+    )
+
+    # Validate decoder cu_seqlens
+    assert dec_cu[0] == 0, "decoder cu_seqlens should start with 0"
+    assert dec_cu.dtype == torch.int32, "decoder cu_seqlens should be int32"
+
+    # Verify labels_unpad matches decoder structure
+    labels_unpad = batch["labels_unpad"]
+    assert labels_unpad.shape == dec_unpad.shape, (
+        f"labels_unpad shape {labels_unpad.shape} != decoder_input_ids_unpad {dec_unpad.shape}"
+    )
+
+    print("  ✓ All unpad outputs validated")
+
+
 def test_real_tokenizer():
     """Test with real HuggingFace tokenizer."""
     print("\n" + "=" * 60)
@@ -1058,6 +1147,7 @@ def main():
 
     # Run tests
     test_masking_correctness(device)
+    test_unpad_outputs(device)
     benchmark_masking_functions(device)
     benchmark_full_collator(device)
     benchmark_cpu_vs_gpu()

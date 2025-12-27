@@ -69,6 +69,10 @@ def apply_sentinel_mask(
     """Apply sentinel mask to input_ids."""
     device = input_ids.device
 
+    # Ensure sentinel_ids is on same device as input_ids for torch.where
+    if sentinel_ids.device != device:
+        sentinel_ids = sentinel_ids.to(device)
+
     result = torch.where(sentinel_ids > 0, sentinel_ids, input_ids)
     result = result[sentinel_ids != -1]
 
