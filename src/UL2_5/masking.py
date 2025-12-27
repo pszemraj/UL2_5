@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import warnings
 from typing import Any
 
@@ -51,20 +52,22 @@ def span_corruption_mask(
     num_spans = max(1, min(max_spans, int(round(num_noise / mu))))
     num_keep = seq_len - num_noise
 
-    noise_lens = _random_segmentation(num_noise, num_spans, device)
-    keep_lens = _random_segmentation(num_keep, num_spans, device)
+    # Compute segmentation on CPU (small tensors, avoids GPU sync on .tolist())
+    cpu_device = torch.device("cpu")
+    noise_lens = _random_segmentation(num_noise, num_spans, cpu_device)
+    keep_lens = _random_segmentation(num_keep, num_spans, cpu_device)
 
     # Interleave segments with random start to avoid edge bias
     n = min(len(noise_lens), len(keep_lens))
     mask = torch.zeros(seq_len, dtype=torch.bool, device=device)
     pos = 0
 
-    # Convert to lists once to avoid repeated .item() calls
+    # Convert to lists (fast on CPU tensors)
     noise_list = noise_lens.tolist()
     keep_list = keep_lens.tolist()
 
-    # Randomize starting pattern to eliminate edge effect at seq end
-    start_with_noise = torch.rand(1, device=device).item() < 0.5
+    # Randomize starting pattern (CPU-only, no sync)
+    start_with_noise = random.random() < 0.5
 
     for i in range(n):
         if start_with_noise:
@@ -122,8 +125,11 @@ def middle_heavy_span_mask(
     num_noise = max(1, min(int(round(seq_len * noise_density)), seq_len - 1))
     num_spans = max(1, int(round(num_noise / mean_span_length)))
 
+    # Compute weights on CPU (avoids GPU sync on multinomial + .tolist())
+    cpu_device = torch.device("cpu")
+
     # Gaussian weights for span START positions (prefer middle)
-    positions = torch.arange(seq_len, dtype=torch.float32, device=device)
+    positions = torch.arange(seq_len, dtype=torch.float32, device=cpu_device)
     center = seq_len / 2
     sigma = seq_len / 4
     weights = torch.exp(-0.5 * ((positions - center) / sigma) ** 2)
@@ -134,7 +140,7 @@ def middle_heavy_span_mask(
 
     # Ensure weights sum to 1
     if weights.sum() < 1e-8:
-        weights = torch.ones(seq_len, dtype=torch.float32, device=device)
+        weights = torch.ones(seq_len, dtype=torch.float32, device=cpu_device)
         weights[cutoff:] = 0
     weights = weights / weights.sum()
 
@@ -146,10 +152,10 @@ def middle_heavy_span_mask(
     starts = torch.multinomial(weights, max_possible_spans, replacement=False)
     starts = torch.sort(starts).values
 
-    # Generate span lengths using Poisson distribution
+    # Generate span lengths using Poisson distribution (on CPU)
     avg_span_len = max(1.0, num_noise / max_possible_spans)
     span_lens = torch.poisson(
-        torch.full((len(starts),), avg_span_len, device=device)
+        torch.full((len(starts),), avg_span_len, device=cpu_device)
     ).long()
     span_lens = torch.clamp(span_lens, min=1, max=max(1, seq_len // max_possible_spans))
 
@@ -194,15 +200,17 @@ def middle_heavy_span_mask(
                         tokens_masked += truncated_end - start
 
     # If we haven't reached target noise, fill in more from high-weight positions
-    current_noise = mask.sum().item()
-    if current_noise < num_noise:
-        remaining = num_noise - current_noise
+    # Use locally tracked tokens_masked (no GPU sync)
+    if tokens_masked < num_noise:
+        remaining = num_noise - tokens_masked
         # Get unmasked positions weighted by original Gaussian
+        # Need to move mask to CPU for indexing (single sync, acceptable for fallback)
+        mask_cpu = mask.cpu()
         unmasked_weights = weights.clone()
-        unmasked_weights[mask] = 0
+        unmasked_weights[mask_cpu] = 0
         if unmasked_weights.sum() > 1e-8:
             unmasked_weights = unmasked_weights / unmasked_weights.sum()
-            extra_count = min(int(remaining), int((~mask).sum().item()))
+            extra_count = min(int(remaining), seq_len - tokens_masked)
             if extra_count > 0:
                 extra_indices = torch.multinomial(
                     unmasked_weights, extra_count, replacement=False
@@ -222,14 +230,13 @@ def prefix_lm_mask(seq_len: int, mode: str, device: torch.device) -> tuple[Tenso
         return mask, max(0, seq_len - 1)
 
     if mode == "random":
-        split = torch.randint(
-            int(0.2 * seq_len), int(0.8 * seq_len) + 1, (1,), device=device
-        ).item()
+        low, high = int(0.2 * seq_len), int(0.8 * seq_len)
+        split = random.randint(low, high) if high > low else low
     elif mode == "short":
-        frac = 0.05 + 0.10 * torch.rand(1, device=device).item()
+        frac = 0.05 + 0.10 * random.random()
         split = int((1 - frac) * seq_len)
     elif mode == "long":
-        frac = 0.05 + 0.15 * torch.rand(1, device=device).item()
+        frac = 0.05 + 0.15 * random.random()
         split = int(frac * seq_len)
     else:
         split = int(0.75 * seq_len)
@@ -258,7 +265,7 @@ def infilling_mask(
     if max_start <= min_start:
         hole_start = seq_len // 3
     else:
-        hole_start = torch.randint(min_start, max_start + 1, (1,), device=device).item()
+        hole_start = random.randint(min_start, max_start)
 
     hole_end = min(hole_start + hole_size, seq_len)
 
