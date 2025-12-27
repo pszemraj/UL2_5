@@ -215,7 +215,7 @@ def middle_heavy_span_mask(
                 extra_indices = torch.multinomial(
                     unmasked_weights, extra_count, replacement=False
                 )
-                mask[extra_indices] = True
+                mask[extra_indices.to(device)] = True
 
     return mask
 
